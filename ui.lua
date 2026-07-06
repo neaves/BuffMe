@@ -1,32 +1,152 @@
-local PARTY_UNITS = { "player", "party1", "party2", "party3", "party4" }
-local ROW_HEIGHT  = 18
-local PANEL_WIDTH = 280
+local PARTY_UNITS    = { "player", "party1", "party2", "party3", "party4" }
+local ROW_HEIGHT     = 18
+local PANEL_WIDTH    = 280
+local FADE_TIME      = CHAT_FRAME_FADE_TIME or 0.5
+local BUTTON_HEIGHT  = 30
+local TITLE_HEIGHT   = 16
 
--- ── Main button ──────────────────────────────────────────────────────────────
+-- ── Container: encloses both title tab and button ─────────────────────────────
+-- Sized to cover the full hover area so IsMouseOver() stays true while the
+-- mouse travels between the button and the title tab above it.
 
-local mainButton = CreateFrame("Button", "BuffMeButton", UIParent, "UIPanelButtonTemplate")
-mainButton:SetWidth(90)
-mainButton:SetHeight(30)
-mainButton:SetPoint("CENTER", UIParent, "CENTER", 0, -200)
-mainButton:SetText("Buff Me!")
-mainButton:SetMovable(true)
-mainButton:EnableMouse(true)
+local container = CreateFrame("Frame", "BuffMeContainer", UIParent)
+container:SetWidth(90)
+container:SetHeight(TITLE_HEIGHT + BUTTON_HEIGHT)  -- 46
+container:SetMovable(true)
+container:EnableMouse(true)
+container:RegisterForDrag("LeftButton")
+-- Anchor so the button portion sits at the same screen position as before
+container:SetPoint("BOTTOM", UIParent, "CENTER", 0, -215)
+
+-- ── Title tab (alpha 0; fades in on hover — mirrors StopwatchTabFrame) ────────
+
+local titleTab = CreateFrame("Frame", "BuffMeTitleTab", container)
+titleTab:SetHeight(TITLE_HEIGHT)
+titleTab:SetPoint("TOPLEFT",  container, "TOPLEFT",  0, 0)
+titleTab:SetPoint("TOPRIGHT", container, "TOPRIGHT", 0, 0)
+titleTab:SetAlpha(0)
+titleTab:SetBackdrop({
+    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+    tile = true, tileSize = 8,
+})
+titleTab:SetBackdropColor(0, 0, 0, 0.7)
+
+local titleText = titleTab:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+titleText:SetPoint("TOPLEFT",     titleTab, "TOPLEFT",     4,   0)
+titleText:SetPoint("BOTTOMRIGHT", titleTab, "BOTTOMRIGHT", -30, 0)
+titleText:SetJustifyH("LEFT")
+titleText:SetText("Buff Me")
+titleText:SetTextColor(1, 0.82, 0)
+
+-- ── Title bar icon buttons ────────────────────────────────────────────────────
+-- Lock/unlock toggle — right side of title bar
+local lockIcon = CreateFrame("Button", "BuffMeLockIcon", titleTab)
+lockIcon:SetSize(12, 12)
+lockIcon:SetPoint("TOPRIGHT", titleTab, "TOPRIGHT", -16, -2)
+lockIcon:SetNormalTexture("Interface\\GLUES\\CharacterSelect\\Glues-AddOn-Icons")
+lockIcon:SetHighlightTexture("Interface\\GLUES\\CharacterSelect\\Glues-AddOn-Icons")
+lockIcon:SetPushedTexture("Interface\\GLUES\\CharacterSelect\\Glues-AddOn-Icons")
+lockIcon:GetHighlightTexture():SetAlpha(0.5)
+
+lockIcon:SetScript("OnClick", function()
+    if not BuffMeDB then return end
+    BuffMeDB.anchorLocked = not BuffMeDB.anchorLocked
+    BuffMe_UpdateLockIcon()
+end)
+lockIcon:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:SetText(BuffMeDB and BuffMeDB.anchorLocked and "Unlock Anchor" or "Lock Anchor", 1, 1, 1)
+    GameTooltip:Show()
+end)
+lockIcon:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+-- Config button — opens Interface > AddOns > Buff Me
+local configIcon = CreateFrame("Button", "BuffMeConfigIcon", titleTab)
+configIcon:SetSize(12, 12)
+configIcon:SetPoint("TOPRIGHT", titleTab, "TOPRIGHT", -2, -2)
+configIcon:SetNormalTexture("Interface\\Buttons\\UI-OptionsButton")
+configIcon:SetHighlightTexture("Interface\\Buttons\\UI-OptionsButton")
+configIcon:SetPushedTexture("Interface\\Buttons\\UI-OptionsButton")
+configIcon:GetHighlightTexture():SetAlpha(0.5)
+
+configIcon:SetScript("OnClick", function()
+    InterfaceOptionsFrame_OpenToCategory("Buff Me")
+    InterfaceOptionsFrame_OpenToCategory("Buff Me")
+end)
+configIcon:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:SetText("Buff Me Options", 1, 1, 1)
+    GameTooltip:Show()
+end)
+configIcon:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+-- ── Main button (inside container, bottom portion) ────────────────────────────
+
+local mainButton = CreateFrame("Button", "BuffMeButton", container, "UIPanelButtonTemplate")
+mainButton:SetHeight(BUTTON_HEIGHT)
+mainButton:SetPoint("BOTTOMLEFT",  container, "BOTTOMLEFT",  0, 0)
+mainButton:SetPoint("BOTTOMRIGHT", container, "BOTTOMRIGHT", 0, 0)
 mainButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-mainButton:RegisterForDrag("LeftButton")
+mainButton:SetText("Buff Me!")
 
--- Badge showing count of missing buffs
+-- Badge: missing buff count (child of button so it sits at the button's corner)
 local badge = mainButton:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 badge:SetPoint("TOPRIGHT", mainButton, "TOPRIGHT", 4, 4)
 badge:SetTextColor(1, 0.2, 0.2, 1)
 badge:Hide()
 
--- Shift-drag to reposition
-mainButton:SetScript("OnDragStart", function(self)
-    if IsShiftKeyDown() then self:StartMoving() end
+-- ── Hover detection (mirrors StopwatchFrame_OnUpdate) ────────────────────────
+
+container.prevMouseIsOver = false
+
+local function OnUpdateHover(self)
+    if self.prevMouseIsOver then
+        if not self:IsMouseOver() then
+            UIFrameFadeOut(titleTab, FADE_TIME)
+            self.prevMouseIsOver = false
+        end
+    else
+        if self:IsMouseOver() then
+            UIFrameFadeIn(titleTab, FADE_TIME)
+            self.prevMouseIsOver = true
+        end
+    end
+end
+
+container:SetScript("OnUpdate", OnUpdateHover)
+
+-- Reset on hide (mirrors StopwatchFrame_OnHide)
+container:SetScript("OnHide", function(self)
+    UIFrameFadeRemoveFrame(titleTab)
+    titleTab:SetAlpha(0)
+    self.prevMouseIsOver = false
 end)
-mainButton:SetScript("OnDragStop", function(self)
+
+-- ── Drag handling ─────────────────────────────────────────────────────────────
+-- Both the container (title area) and the button (button area) can initiate a
+-- drag; both move the container.
+
+-- Pause hover detection while mouse is held (mirrors StopwatchFrame_OnMouseDown/Up)
+local function pauseHover()  container:SetScript("OnUpdate", nil)           end
+local function resumeHover() container:SetScript("OnUpdate", OnUpdateHover) end
+
+-- Drag: only the container (title area) initiates movement; no shift required
+container:SetScript("OnDragStart", function(self)
+    if BuffMeDB and BuffMeDB.anchorLocked then return end
+    self:StartMoving()
+end)
+container:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
+    resumeHover()  -- mirrors StopwatchFrame_OnDragStop calling OnMouseUp
 end)
+container:SetScript("OnMouseDown", pauseHover)
+container:SetScript("OnMouseUp",   resumeHover)
+
+-- Button: clicks only; pause/resume hover during press, no drag
+mainButton:SetScript("OnMouseDown", function(self) pauseHover() end)
+mainButton:SetScript("OnMouseUp",   function(self) resumeHover() end)
+
+-- ── Button clicks ─────────────────────────────────────────────────────────────
 
 mainButton:SetScript("OnClick", function(self, button)
     if button == "LeftButton" then
@@ -40,7 +160,7 @@ end)
 
 local panel = CreateFrame("Frame", "BuffMePanel", UIParent)
 panel:SetWidth(PANEL_WIDTH)
-panel:SetPoint("BOTTOM", mainButton, "TOP", 0, 4)
+panel:SetPoint("BOTTOM", container, "TOP", 0, 4)
 panel:Hide()
 panel:SetFrameStrata("HIGH")
 panel:SetBackdrop({
@@ -52,9 +172,8 @@ panel:SetBackdrop({
 
 local panelTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 panelTitle:SetPoint("TOP", panel, "TOP", 0, -10)
-panelTitle:SetText("Buff Me — Party Status")
+panelTitle:SetText("Buff Me - Party Status")
 
--- Pre-create one row per possible party slot (player + 4 party members)
 local rows = {}
 for i = 1, 5 do
     local row = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -65,7 +184,7 @@ for i = 1, 5 do
     rows[i] = row
 end
 
--- ── Public API ───────────────────────────────────────────────────────────────
+-- ── Public API ────────────────────────────────────────────────────────────────
 
 function BuffMe_UpdateBadge()
     if not BuffMeDB then return end
@@ -91,7 +210,6 @@ function BuffMe_RefreshPanel()
             local row  = rows[rowIdx]
             local name = UnitName(unit) or unit
 
-            -- Count missing typeGroups for this unit
             local unitAuras = {}
             local i = 1
             while true do
@@ -108,19 +226,17 @@ function BuffMe_RefreshPanel()
                 if not unitAuras[tg] then missing = missing + 1 end
             end
 
-            local color = missing == 0 and "|cff44ff44" or "|cffff4444"
+            local color  = missing == 0 and "|cff44ff44" or "|cffff4444"
             local status = missing == 0 and "Buffed" or (missing .. " missing")
-            row:SetText(color .. name .. "|r  —  " .. status)
+            row:SetText(color .. name .. "|r  -  " .. status)
             row:Show()
         end
     end
 
-    -- Hide unused rows
     for i = rowIdx + 1, 5 do
         rows[i]:Hide()
     end
 
-    -- Resize panel to content
     local height = 28 + rowIdx * ROW_HEIGHT + 12
     panel:SetHeight(math.max(60, height))
 end
@@ -132,6 +248,22 @@ function BuffMe_TogglePanel()
         BuffMe_RefreshPanel()
         panel:Show()
     end
+end
+
+-- Sync the lock icon texcoords to the current anchorLocked state
+function BuffMe_UpdateLockIcon()
+    if not BuffMeDB then return end
+    -- Glues-AddOn-Icons sprite: left quarter = locked, second quarter = unlocked
+    local l, r = BuffMeDB.anchorLocked and 0 or 0.25,
+                  BuffMeDB.anchorLocked and 0.25 or 0.5
+    lockIcon:GetNormalTexture():SetTexCoord(l, r, 0, 1)
+    lockIcon:GetHighlightTexture():SetTexCoord(l, r, 0, 1)
+    lockIcon:GetPushedTexture():SetTexCoord(l, r, 0, 1)
+end
+
+function BuffMe_ResetPosition()
+    container:ClearAllPoints()
+    container:SetPoint("BOTTOM", UIParent, "CENTER", 0, -215)
 end
 
 function BuffMe_SetCombatState(combat)

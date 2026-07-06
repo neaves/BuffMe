@@ -41,6 +41,9 @@ function BuffMe_InitDB()
     BuffMeDB.spellToPlayerGroup  = BuffMeDB.spellToPlayerGroup  or {}
     -- [playerGroup] = { spellId, ... }
     BuffMeDB.playerGroupMembers  = BuffMeDB.playerGroupMembers  or {}
+    -- config settings
+    if BuffMeDB.anchorLocked    == nil then BuffMeDB.anchorLocked    = false end
+    if BuffMeDB.diagnosticMode  == nil then BuffMeDB.diagnosticMode  = false end
 end
 
 function BuffMe_GetSpell(spellId)
@@ -62,9 +65,11 @@ function BuffMe_RegisterSpell(spellId, spellName, auraName)
     local normalAura = BuffMe_NormalizeName(auraName)
     if not BuffMeDB.auraToTypeGroup[normalAura] then
         local typeGroup = normalAura
-        BuffMeDB.auraToTypeGroup[normalAura]     = typeGroup
-        BuffMeDB.typeGroupMembers[typeGroup]     = { normalAura }
+        BuffMeDB.auraToTypeGroup[normalAura] = typeGroup
+        BuffMeDB.typeGroupMembers[typeGroup] = { normalAura }
     end
+
+    BuffMe_Debug("Spell learned: " .. spellName .. " (ID " .. spellId .. ", typeGroup: " .. BuffMeDB.auraToTypeGroup[normalAura] .. ")")
 end
 
 -- Merge the typeGroups of two aura names when we learn they are mutually exclusive
@@ -75,6 +80,8 @@ function BuffMe_MergeTypeGroups(auraName1, auraName2)
     local tg2 = BuffMeDB.auraToTypeGroup[n2]
 
     if not tg1 or not tg2 or tg1 == tg2 then return end
+
+    BuffMe_Debug("TypeGroup merge: \"" .. tg2 .. "\" folded into \"" .. tg1 .. "\" (via " .. auraName1 .. " vs " .. auraName2 .. ")")
 
     -- Merge tg2 into tg1 (tg1 is canonical)
     local members = BuffMeDB.typeGroupMembers[tg2] or {}
@@ -184,11 +191,19 @@ function BuffMe_FindBlockingBuff(targetUnit, ourSpellName)
     return nil
 end
 
--- Return all spell entries that are currently in the player's spellbook
+-- Return all spell entries that are currently in the player's spellbook.
+-- Handles both numeric IDs (checked via GetSpellInfo) and synthetic string keys
+-- (checked via GetSpellInfo(name) — used when no numeric ID could be determined).
 function BuffMe_GetKnownBuffSpells()
     local result = {}
-    for spellId, entry in pairs(BuffMeDB.spells) do
-        if GetSpellInfo(spellId) then
+    for key, entry in pairs(BuffMeDB.spells) do
+        local available
+        if type(key) == "number" then
+            available = GetSpellInfo(key) ~= nil
+        else
+            available = GetSpellInfo(entry.name) ~= nil
+        end
+        if available then
             table.insert(result, entry)
         end
     end

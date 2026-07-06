@@ -10,3 +10,4 @@ spells.lua
 optimizer.lua
 BuffMe.lua
 ui.lua
+config.lua

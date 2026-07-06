@@ -1,0 +1,12 @@
+## Interface: 30300
+## Title: Buff Me
+## Notes: Smart party buff manager. Click to apply the next needed buff. Right-click to see party status.
+## Author:
+## Version: 1.0
+## DefaultState: enabled
+## SavedVariables: BuffMeDB
+
+spells.lua
+optimizer.lua
+BuffMe.lua
+ui.lua

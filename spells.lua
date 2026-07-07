@@ -36,6 +36,7 @@ function BuffMe_ResetSpellDB()
     BuffMeDB.targetGroupMembers  = {}
     BuffMeDB.spellToPlayerGroup  = {}
     BuffMeDB.playerGroupMembers  = {}
+    BuffMeDB.lastCastForGroup    = {}
 end
 
 function BuffMe_InitDB()
@@ -61,6 +62,29 @@ function BuffMe_InitDB()
     BuffMeDB.diagnosticLog = BuffMeDB.diagnosticLog or {}
     -- reverse name→key index for O(1) "already registered?" checks
     BuffMeDB.nameToKey = BuffMeDB.nameToKey or {}
+    -- per-typeGroup per-target last-cast preference: [typeGroup][targetName] = spellKey
+    BuffMeDB.lastCastForGroup = BuffMeDB.lastCastForGroup or {}
+end
+
+-- Record which spell was last cast for a typeGroup on a named target.
+-- Called whenever CLEU or UNIT_AURA confirms a buff actually landed.
+function BuffMe_RecordLastCast(typeGroup, targetName, spellKey)
+    if not typeGroup or not targetName or not spellKey then return end
+    local tg = BuffMeDB.lastCastForGroup[typeGroup]
+    if not tg then
+        tg = {}
+        BuffMeDB.lastCastForGroup[typeGroup] = tg
+    end
+    tg[targetName] = spellKey
+    BuffMe_Debug("Preference recorded: typeGroup \"" .. typeGroup ..
+        "\" → \"" .. tostring(spellKey) .. "\" on " .. targetName)
+end
+
+-- Return the preferred spellKey for a typeGroup/target pair, or nil if none recorded.
+function BuffMe_GetPreferredSpellKey(typeGroup, targetName)
+    if not BuffMeDB.lastCastForGroup then return nil end
+    local tg = BuffMeDB.lastCastForGroup[typeGroup]
+    return tg and tg[targetName]
 end
 
 function BuffMe_GetSpell(spellId)
@@ -71,11 +95,18 @@ end
 function BuffMe_RegisterSpell(spellId, spellName, auraName)
     if BuffMeDB.spells[spellId] then return end  -- already known
 
+    -- Spells with a cooldown beyond the GCD (1.5 s) are combat/emergency buttons;
+    -- flag them so they are excluded from the auto-buff rotation.
+    local cdKey = type(spellId) == "number" and spellId or spellName
+    local _, cdDuration = GetSpellCooldown(cdKey)
+    local hasCooldown = cdDuration and cdDuration > 1.5 or nil
+
     BuffMeDB.spells[spellId] = {
-        spellId  = spellId,
-        name     = spellName,
-        auraName = auraName,
-        priority = 5,
+        spellId    = spellId,
+        name       = spellName,
+        auraName   = auraName,
+        priority   = 5,
+        ineligible = hasCooldown,
     }
     BuffMeDB.nameToKey[spellName] = spellId  -- reverse index; any valid key works for lookup
 
@@ -87,7 +118,25 @@ function BuffMe_RegisterSpell(spellId, spellName, auraName)
         BuffMeDB.typeGroupMembers[typeGroup] = { normalAura }
     end
 
-    BuffMe_Debug("Spell learned: " .. spellName .. " (ID " .. spellId .. ", typeGroup: " .. BuffMeDB.auraToTypeGroup[normalAura] .. ")")
+    if hasCooldown then
+        BuffMe_Debug("Spell learned — INELIGIBLE (cooldown " .. cdDuration ..
+            "s): \"" .. spellName .. "\" (key " .. tostring(spellId) .. ")")
+    else
+        BuffMe_Debug("Spell learned: " .. spellName .. " (key " .. tostring(spellId) ..
+            ", typeGroup: " .. BuffMeDB.auraToTypeGroup[normalAura] .. ")")
+    end
+end
+
+-- Mark a spell ineligible for auto-buffing (hostile-target requirement, cooldown, etc.).
+-- Persists in SavedVariables so the decision survives reloads.
+function BuffMe_MarkIneligible(key, reason)
+    local entry = BuffMeDB.spells[key]
+    if entry and not entry.ineligible then
+        entry.ineligible = true
+        BuffMe_Debug("Marked ineligible (" .. (reason or "?") .. "): \"" .. entry.name .. "\"")
+        return true
+    end
+    return false
 end
 
 -- Merge the typeGroups of two aura names when we learn they are mutually exclusive
@@ -209,20 +258,21 @@ function BuffMe_FindBlockingBuff(targetUnit, ourSpellName)
     return nil
 end
 
--- Return all spell entries that are currently in the player's spellbook.
--- Handles both numeric IDs (checked via GetSpellInfo) and synthetic string keys
--- (checked via GetSpellInfo(name) — used when no numeric ID could be determined).
+-- Return all spell entries that are currently in the player's spellbook and eligible
+-- for auto-buffing (not flagged ineligible due to cooldown or hostile-target requirement).
 function BuffMe_GetKnownBuffSpells()
     local result = {}
     for key, entry in pairs(BuffMeDB.spells) do
-        local available
-        if type(key) == "number" then
-            available = GetSpellInfo(key) ~= nil
-        else
-            available = GetSpellInfo(entry.name) ~= nil
-        end
-        if available then
-            table.insert(result, entry)
+        if not entry.ineligible then
+            local available
+            if type(key) == "number" then
+                available = GetSpellInfo(key) ~= nil
+            else
+                available = GetSpellInfo(entry.name) ~= nil
+            end
+            if available then
+                table.insert(result, entry)
+            end
         end
     end
     return result

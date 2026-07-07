@@ -90,6 +90,7 @@ frame:RegisterEvent("SPELLS_CHANGED")
 frame:RegisterEvent("UI_ERROR_MESSAGE")
 frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 frame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+frame:RegisterEvent("UNIT_SPELLCAST_SENT")
 
 local function RefreshUI()
     if BuffMe_UpdateBadge  then BuffMe_UpdateBadge()  end
@@ -117,6 +118,17 @@ local ERROR_PATTERNS = {
     "cannot be cast",
 }
 
+-- Detect hostile-target-required errors.  These spells incidentally apply a buff to
+-- the caster but cannot be used on party members — mark them ineligible permanently.
+local HARM_TARGET_PATTERNS = {
+    "hostile",
+    "must be an enemy",
+    "can only be used on enemies",
+    "only use that on enemies",
+    "requires a harmful",
+    "requires an enemy",
+}
+
 -- Static set of CLEU event types relevant to cast/aura activity; used by the diagnostic dump.
 local CAST_AURA_EVENTS = {
     SPELL_CAST_START        = true, SPELL_CAST_SUCCESS      = true,
@@ -127,12 +139,58 @@ local CAST_AURA_EVENTS = {
 }
 
 local function IsBouncedError(msg)
-    if not msg then return false end
+    if type(msg) ~= "string" then return false end
     local lower = msg:lower()
     for _, pat in ipairs(ERROR_PATTERNS) do
-        if lower:find(pat) then return true end
+        if lower:find(pat, 1, true) then return true end
     end
     return false
+end
+
+local function IsHarmTargetError(msg)
+    if type(msg) ~= "string" then return false end
+    local lower = msg:lower()
+    for _, pat in ipairs(HARM_TARGET_PATTERNS) do
+        if lower:find(pat, 1, true) then return true end
+    end
+    return false
+end
+
+-- Shared handler for "more powerful spell" rejections, called from both UI_ERROR_MESSAGE
+-- and CLEU SPELL_CAST_FAILED (Ascension may fire one but not the other).
+-- Reads and clears lastCastAttempt; safe to call when lastCastAttempt is nil.
+local function HandleBouncedCast(source)
+    if not lastCastAttempt then return end
+    local targetUnit   = lastCastAttempt.unit
+    local ourSpellName = lastCastAttempt.spellName
+    local ourKey       = lastCastAttempt.spellId
+    BuffMe_Debug("Cast rejected (" .. source .. "): \"" .. (ourSpellName or "?") .. "\"")
+    if targetUnit and ourSpellName and UnitExists(targetUnit) then
+        local blockingBuff = BuffMe_FindBlockingBuff(targetUnit, ourSpellName)
+        if blockingBuff then
+            BuffMe_Debug("Blocking aura found: \"" .. blockingBuff .. "\" → merging typeGroups")
+            BuffMe_MergeTypeGroups(ourSpellName, blockingBuff)
+            for sid, entry in pairs(BuffMeDB.spells) do
+                if entry.auraName == blockingBuff then
+                    BuffMe_Debug("Linking targetGroup: " .. tostring(ourKey) .. " + " .. tostring(sid))
+                    BuffMe_LinkTargetGroup(ourKey, sid)
+                    break
+                end
+            end
+        else
+            -- Dump every buff on the target so the user can identify the blocker manually.
+            BuffMe_Debug("No blocking aura auto-identified on " .. targetUnit ..
+                " for \"" .. ourSpellName .. "\" — dumping target buffs:")
+            local bi = 1
+            while true do
+                local bn, _, _, _, _, _, _, caster = UnitBuff(targetUnit, bi)
+                if not bn then break end
+                BuffMe_Debug("  [" .. bi .. "] \"" .. bn .. "\" (caster: " .. (caster or "?") .. ")")
+                bi = bi + 1
+            end
+        end
+    end
+    lastCastAttempt = nil
 end
 
 frame:SetScript("OnEvent", function(self, event, ...)
@@ -184,6 +242,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
                     sid = "__" .. pending.name
                 end
                 BuffMe_RegisterSpell(sid, pending.name, auraName)
+                -- Record last-cast preference (UNIT_AURA fallback is always player→player).
+                local normalAura = BuffMe_NormalizeName(auraName)
+                local tg = BuffMeDB.auraToTypeGroup[normalAura]
+                if tg then BuffMe_RecordLastCast(tg, UnitName("player"), sid) end
                 local idStr = type(sid) == "number" and ("ID " .. sid) or ("key \"" .. sid .. "\"")
                 if auraName ~= pending.name then
                     BuffMe_Debug("Registered via UNIT_AURA fallback: spell \"" .. pending.name ..
@@ -242,29 +304,57 @@ frame:SetScript("OnEvent", function(self, event, ...)
         ScheduleRescan()
 
     elseif event == "UI_ERROR_MESSAGE" then
-        local msg = ...
-        if lastCastAttempt and IsBouncedError(msg) then
-            local targetUnit   = lastCastAttempt.unit
-            local ourSpellName = lastCastAttempt.spellName
-            BuffMe_Debug("Cast rejected: \"" .. (ourSpellName or "?") .. "\" — " .. (msg or "unknown error"))
-            if targetUnit and ourSpellName and UnitExists(targetUnit) then
-                local blockingBuff = BuffMe_FindBlockingBuff(targetUnit, ourSpellName)
-                if blockingBuff then
-                    BuffMe_Debug("Blocking aura found: \"" .. blockingBuff .. "\" → merging typeGroups")
-                    BuffMe_MergeTypeGroups(ourSpellName, blockingBuff)
-
-                    for sid, entry in pairs(BuffMeDB.spells) do
-                        if entry.auraName == blockingBuff then
-                            BuffMe_Debug("Linking targetGroup: spell " .. lastCastAttempt.spellId .. " + spell " .. sid)
-                            BuffMe_LinkTargetGroup(lastCastAttempt.spellId, sid)
-                            break
-                        end
-                    end
-                else
-                    BuffMe_Debug("No blocking aura identified on " .. targetUnit)
-                end
+        local a1, a2 = ...
+        -- WotLK fires (message); some builds fire (errorType, message). Handle both.
+        local msg = (type(a2) == "string" and a2 ~= "" and a2)
+                 or (type(a1) == "string" and a1 ~= "" and a1)
+                 or nil
+        -- Log every error so unrecognised server strings are visible in diagnostic mode.
+        BuffMe_Debug("UI_ERROR [" .. tostring(a1) ..
+            (a2 ~= nil and (", " .. tostring(a2)) or "") .. "]: " .. (msg or "(no string)") ..
+            (lastCastAttempt and (" [after \"" .. (lastCastAttempt.spellName or "?") .. "\"]") or ""))
+        if lastCastAttempt and IsHarmTargetError(msg) then
+            -- Spell requires a hostile target; flag it ineligible permanently.
+            if BuffMe_MarkIneligible(lastCastAttempt.spellId, "requires hostile target") then
+                ScheduleRescan()
             end
             lastCastAttempt = nil
+        elseif lastCastAttempt and IsBouncedError(msg) then
+            HandleBouncedCast("UI_ERROR")
+        end
+
+    elseif event == "UNIT_SPELLCAST_SENT" then
+        -- Fires for ALL player casts (instant and cast-time) before the server result.
+        -- Populates lastCastAttempt for manual buff casts so bounced-error learning works
+        -- even when the cast was not initiated by the Buff Me button.
+        -- Only tracks casts aimed at party members — ignores enemy-targeted spells.
+        local unit, spellName, rank, target = ...
+        if unit == "player" and spellName then
+            if not lastCastAttempt or lastCastAttempt.spellName ~= spellName then
+                local targetUnit = nil
+                if target then
+                    for _, u in ipairs({"player","party1","party2","party3","party4"}) do
+                        if UnitExists(u) and UnitName(u) == target then
+                            targetUnit = u; break
+                        end
+                    end
+                end
+                -- Self-casts arrive as the player's own name or an empty string.
+                if not targetUnit and (not target or target == "" or target == UnitName("player")) then
+                    targetUnit = "player"
+                end
+                -- Open-world friendly targets (not in party) — use the "target" unit token
+                -- so UnitBuff scans still work. Skip hostile targets to avoid tracking damage casts.
+                if not targetUnit and UnitExists("target") and UnitIsFriend("player", "target") then
+                    targetUnit = "target"
+                end
+                if targetUnit then
+                    local dbKey = BuffMeDB and BuffMeDB.nameToKey and BuffMeDB.nameToKey[spellName]
+                    lastCastAttempt = { spellId = dbKey, unit = targetUnit, spellName = spellName }
+                    BuffMe_Debug("Cast sent: \"" .. spellName .. "\" → " .. targetUnit ..
+                        (target and target ~= "" and (" (\"" .. target .. "\")") or ""))
+                end
+            end
         end
 
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
@@ -277,6 +367,26 @@ frame:SetScript("OnEvent", function(self, event, ...)
             -- By recording the name here, CLEU can distinguish "player cast this" from
             -- "proc applied this with playerGUID as source".
             recentlyCastName = spellName
+
+            -- Retroactive cooldown check: spells registered before the cooldown filter
+            -- existed won't have ineligible set. Now that the spell was just cast, its
+            -- cooldown is active — check it and mark ineligible if warranted.
+            local existingKey = (spellId and BuffMeDB and BuffMeDB.spells[spellId] and spellId)
+                or (BuffMeDB and BuffMeDB.nameToKey and BuffMeDB.nameToKey[spellName])
+            if existingKey then
+                local existing = BuffMeDB.spells[existingKey]
+                if existing and not existing.ineligible then
+                    local cdKey = type(existingKey) == "number" and existingKey or spellName
+                    local _, cdDuration = GetSpellCooldown(cdKey)
+                    if cdDuration and cdDuration > 1.5 then
+                        existing.ineligible = true
+                        BuffMe_Debug("Retroactive cooldown (" .. cdDuration ..
+                            "s) — marked ineligible: \"" .. spellName .. "\"")
+                        ScheduleRescan()
+                    end
+                end
+            end
+
             -- Queue a buff-scan registration for spells that don't appear in CLEU.
             -- nameToKey covers spells registered via CLEU under a numeric key (the common
             -- case where UNIT_SPELLCAST_SUCCEEDED carries no spellId but CLEU fires later).
@@ -329,6 +439,13 @@ frame:SetScript("OnEvent", function(self, event, ...)
                             "\" (ID " .. spellId .. ") — no active cast for this spell this frame")
                     else
                         BuffMe_RegisterSpell(spellId, spellName, spellName)
+                        -- Record last-cast preference for this typeGroup/target pair.
+                        -- This is the authoritative confirmation the buff actually landed.
+                        if destName then
+                            local normalAura = BuffMe_NormalizeName(spellName)
+                            local tg = BuffMeDB.auraToTypeGroup[normalAura]
+                            if tg then BuffMe_RecordLastCast(tg, destName, spellId) end
+                        end
                         -- TypeGroup learning: if a buff was removed on this target just before
                         -- this APPLIED (CLEU REMOVED fires before APPLIED within the same
                         -- server tick), they are mutually exclusive → merge typeGroups.
@@ -366,6 +483,20 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 BuffMe_Debug("Untracked aura left player: \"" .. (spellName or "?") ..
                     "\" (ID " .. (spellId or "?") .. ") from " ..
                     (sourceName or sourceGUID or "?"))
+            end
+
+        elseif eventType == "SPELL_CAST_FAILED" and sourceGUID == playerGUID then
+            -- For SPELL_CAST_FAILED, the 12th CLEU arg (captured as auraType) is the
+            -- failedType string — the same text that would appear in UI_ERROR_MESSAGE.
+            -- Use this as a fallback for servers that don't fire UI_ERROR_MESSAGE.
+            local failedType = auraType
+            if failedType and IsBouncedError(failedType) then
+                HandleBouncedCast("CLEU")
+            elseif failedType and IsHarmTargetError(failedType) and lastCastAttempt then
+                if BuffMe_MarkIneligible(lastCastAttempt.spellId, "requires hostile target") then
+                    ScheduleRescan()
+                end
+                lastCastAttempt = nil
             end
         end
     end

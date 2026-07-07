@@ -87,10 +87,54 @@ diagBtn:SetScript("OnClick", function()
     end
 end)
 
+local clearLogBtn = CreateFrame("Button", "BuffMeClearLogButton", panel, "UIPanelButtonTemplate")
+clearLogBtn:SetSize(140, 24)
+clearLogBtn:SetPoint("LEFT", diagBtn, "RIGHT", 8, 0)
+clearLogBtn:SetText("Clear Log")
+clearLogBtn:SetScript("OnClick", function()
+    if not BuffMeDB then return end
+    BuffMeDB.diagnosticLog = {}
+    DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Diagnostic log cleared.")
+    RefreshLogLabel()
+end)
+
+local logLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+logLabel:SetPoint("TOPLEFT", diagBtn, "BOTTOMLEFT", 0, -8)
+logLabel:SetText("")
+
+function RefreshLogLabel()
+    if BuffMeDB and BuffMeDB.diagnosticLog then
+        logLabel:SetText(#BuffMeDB.diagnosticLog .. " entries in log (written to disk on /reload)")
+    end
+end
+
+-- ── Spell database ───────────────────────────────────────────────────────────
+
+local dbLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+dbLabel:SetPoint("TOPLEFT", logLabel, "BOTTOMLEFT", 0, -20)
+dbLabel:SetText("Spell Database")
+
+local dbDesc = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+dbDesc:SetPoint("TOPLEFT", dbLabel, "BOTTOMLEFT", 0, -4)
+dbDesc:SetText("Clears all learned spells and exclusivity groups.\nUse if proc-sourced spells were incorrectly registered.")
+
+local resetDBBtn = CreateFrame("Button", "BuffMeResetDBButton", panel, "UIPanelButtonTemplate")
+resetDBBtn:SetSize(160, 24)
+resetDBBtn:SetPoint("TOPLEFT", dbDesc, "BOTTOMLEFT", 0, -10)
+resetDBBtn:SetText("Reset Spell Database")
+resetDBBtn:SetScript("OnClick", function()
+    if not BuffMeDB then return end
+    BuffMe_ResetSpellDB()
+    DEFAULT_CHAT_FRAME:AddMessage(
+        "|cff00ccff[Buff Me]|r Spell database reset. " ..
+        "Spells will be re-learned as you cast them.")
+end)
+
 -- Refresh button labels each time the panel is opened
 local function RefreshPanel()
     RefreshAnchorButton()
     RefreshDiagButton()
+    RefreshLogLabel()
 end
 
 panel:SetScript("OnShow", RefreshPanel)

@@ -3,6 +3,13 @@ local ADDON_NAME = "BuffMe"
 function BuffMe_Debug(msg)
     if BuffMeDB and BuffMeDB.diagnosticMode then
         DEFAULT_CHAT_FRAME:AddMessage("|cff888888[BuffMe]|r " .. tostring(msg))
+        local log = BuffMeDB.diagnosticLog
+        if log then
+            table.insert(log, date("%H:%M:%S") .. "  " .. tostring(msg))
+            if #log > 500 then
+                table.remove(log, 1)
+            end
+        end
     end
 end
 
@@ -11,6 +18,8 @@ local lastCastAttempt = nil  -- { spellId, unit, spellName } — for error-based
 local rescanPending   = false
 local pendingCast     = nil  -- { name, spellId } — for CLEU-less spells learned via UNIT_AURA
 local playerBuffCache = {}   -- [buffName] = true; tracks current player buffs for diff
+local pendingRemovals    = {}   -- [destGUID] = auraName; CLEU REMOVED waiting for paired APPLIED
+local recentlyCastName   = nil  -- spell name from UNIT_SPELLCAST_SUCCEEDED; cleared each frame
 
 -- Build a fresh snapshot of the player's current buffs without emitting diff messages.
 -- Called on login/reload so the first real UNIT_AURA doesn't report every existing buff.
@@ -25,11 +34,13 @@ local function SnapshotPlayerBuffs()
     end
 end
 
--- Diff current player buffs against the cache, log changes in diagnostic mode, update cache.
--- Returns a list of newly-gained buff names (always, regardless of diagnostic mode).
+-- Diff current player buffs against the cache; log changes, update cache.
+-- Returns gained (list), lost (list) — always populated regardless of diagnostic mode,
+-- so callers can use them for typeGroup learning even when diagnostics are off.
 local function DiffPlayerBuffs()
     local current = {}
     local gained  = {}
+    local lost    = {}
     local i = 1
     while true do
         local name = UnitBuff("player", i)
@@ -43,15 +54,14 @@ local function DiffPlayerBuffs()
             BuffMe_Debug("Buff gained: \"" .. name .. "\"")
         end
     end
-    if BuffMeDB and BuffMeDB.diagnosticMode then
-        for name in pairs(playerBuffCache) do
-            if not current[name] then
-                BuffMe_Debug("Buff lost: \"" .. name .. "\"")
-            end
+    for name in pairs(playerBuffCache) do
+        if not current[name] then
+            table.insert(lost, name)
+            BuffMe_Debug("Buff lost: \"" .. name .. "\"")
         end
     end
     playerBuffCache = current
-    return gained
+    return gained, lost
 end
 
 -- Scan the spellbook to find a spell ID by name; fallback when UNIT_SPELLCAST_SUCCEEDED
@@ -88,6 +98,8 @@ end
 
 -- Throttle: rescans accumulate and fire once per frame via OnUpdate
 frame:SetScript("OnUpdate", function(self, elapsed)
+    if next(pendingRemovals) then wipe(pendingRemovals) end  -- clear unmatched CLEU removals
+    recentlyCastName = nil  -- proc guard: reset each frame after CLEU has had a chance to fire
     if rescanPending then
         rescanPending = false
         RefreshUI()
@@ -145,10 +157,11 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     elseif event == "UNIT_AURA" then
         local unit = ...
-        local gained = {}
+        local gained, lost = {}, {}
         if unit == "player" then
-            gained = DiffPlayerBuffs()
+            gained, lost = DiffPlayerBuffs()
         end
+
         -- Resolve pending registration for CLEU-less spells (e.g. Grove Instinct).
         -- The spell name and aura name may differ (spell 10000 can apply aura 20000),
         -- so we use the diff list rather than name-matching.
@@ -166,10 +179,9 @@ frame:SetScript("OnEvent", function(self, event, ...)
             end
 
             if auraName then
-                -- Get spell ID: event-provided → spellbook scan → synthetic name key.
                 local sid = pending.spellId or FindSpellIdInBook(pending.name)
                 if not sid then
-                    sid = "__" .. pending.name   -- synthetic: no real ID found
+                    sid = "__" .. pending.name
                 end
                 BuffMe_RegisterSpell(sid, pending.name, auraName)
                 local idStr = type(sid) == "number" and ("ID " .. sid) or ("key \"" .. sid .. "\"")
@@ -184,10 +196,35 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 BuffMe_Debug("Ambiguous registration after \"" .. pending.name .. "\": " ..
                     #gained .. " new buffs — try casting when no other buffs are applied")
             else
-                BuffMe_Debug("No new buff appeared after casting \"" .. pending.name ..
-                    "\" — not registered")
+                -- On Ascension, UNIT_AURA fires before CLEU, so SPELL_AURA_REFRESH
+                -- hasn't had a chance to clear pendingCast yet for known-spell refreshes.
+                -- Suppress the miss warning if the spell is already in the DB.
+                local known = (pending.spellId and BuffMeDB.spells[pending.spellId])
+                    or BuffMeDB.spells["__" .. pending.name]
+                    or BuffMeDB.nameToKey[pending.name]
+                if not known then
+                    for _, e in pairs(BuffMeDB.spells) do
+                        if e.name == pending.name then known = true; break end
+                    end
+                end
+                if not known then
+                    BuffMe_Debug("No new buff appeared after casting \"" .. pending.name ..
+                        "\" — not registered")
+                end
             end
         end
+
+        -- TypeGroup learning for CLEU-less buff swaps (e.g. Grove Instinct replaced by Primal
+        -- Instinct — no CLEU REMOVED fires, but diff captures both sides of the swap).
+        -- Only act on unambiguous 1-for-1 swaps to avoid false merges.
+        if unit == "player" and #gained == 1 and #lost == 1 then
+            local g, l = gained[1], lost[1]
+            if g ~= l then
+                BuffMe_Debug("Buff swap (diff): \"" .. l .. "\" → \"" .. g .. "\" — merging typeGroups")
+                BuffMe_MergeTypeGroups(l, g)
+            end
+        end
+
         ScheduleRescan()
 
     elseif event == "SPELLS_CHANGED" then
@@ -235,12 +272,17 @@ frame:SetScript("OnEvent", function(self, event, ...)
         if unit == "player" and spellName then
             BuffMe_Debug("Cast succeeded: \"" .. spellName .. "\"" ..
                 (spellId and (" (ID " .. spellId .. ")") or " (no ID in event)"))
+            -- Gate for CLEU proc detection: UNIT_SPELLCAST_SUCCEEDED fires only for active
+            -- player casts, not passive procs. CLEU SPELL_AURA_APPLIED fires for both.
+            -- By recording the name here, CLEU can distinguish "player cast this" from
+            -- "proc applied this with playerGUID as source".
+            recentlyCastName = spellName
             -- Queue a buff-scan registration for spells that don't appear in CLEU.
-            -- Check both the numeric ID and the synthetic string key so re-casts of
-            -- already-registered spells (e.g. Grove Instinct) don't trigger spurious
-            -- "No new buff appeared" warnings on every refresh.
+            -- nameToKey covers spells registered via CLEU under a numeric key (the common
+            -- case where UNIT_SPELLCAST_SUCCEEDED carries no spellId but CLEU fires later).
             local alreadyKnown = (spellId and BuffMeDB and BuffMeDB.spells[spellId])
-                or (BuffMeDB and BuffMeDB.spells["__" .. spellName])
+                or (BuffMeDB and (BuffMeDB.spells["__" .. spellName]
+                                  or BuffMeDB.nameToKey[spellName]))
             if not alreadyKnown then
                 pendingCast = { name = spellName, spellId = spellId }
             end
@@ -266,22 +308,49 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 (auraType and (" ["     .. auraType .. "]") or ""))
         end
 
-        if eventType == "SPELL_AURA_APPLIED" and auraType == "BUFF" then
+        if eventType == "SPELL_AURA_REFRESH" and auraType == "BUFF" then
+            if sourceGUID == playerGUID and spellId and spellName then
+                BuffMe_Debug("Aura refreshed: \"" .. spellName .. "\" (ID " .. spellId ..
+                    ") on " .. (destName or "?"))
+                lastCastAttempt = nil
+                pendingCast = nil  -- refresh is a valid cast outcome; suppress "no new buff" warning
+                ScheduleRescan()
+            end
+
+        elseif eventType == "SPELL_AURA_APPLIED" and auraType == "BUFF" then
             if sourceGUID == playerGUID then
                 if spellId and spellName then
                     local isNew = not BuffMeDB.spells[spellId]
-                    BuffMe_RegisterSpell(spellId, spellName, spellName)
-                    if not isNew then
-                        BuffMe_Debug("Aura applied: \"" .. spellName .. "\" (ID " .. spellId ..
-                            ") → " .. (destName or "?"))
+                    if isNew and recentlyCastName ~= spellName then
+                        -- No matching UNIT_SPELLCAST_SUCCEEDED this frame → likely a passive
+                        -- proc or reactive ability rather than something the player can cast.
+                        -- Log it in diagnostic mode but do not add it to the spell DB.
+                        BuffMe_Debug("Skipped registration (proc?): \"" .. spellName ..
+                            "\" (ID " .. spellId .. ") — no active cast for this spell this frame")
+                    else
+                        BuffMe_RegisterSpell(spellId, spellName, spellName)
+                        -- TypeGroup learning: if a buff was removed on this target just before
+                        -- this APPLIED (CLEU REMOVED fires before APPLIED within the same
+                        -- server tick), they are mutually exclusive → merge typeGroups.
+                        if pendingRemovals[destGUID] then
+                            local removedName = pendingRemovals[destGUID]
+                            pendingRemovals[destGUID] = nil
+                            if removedName ~= spellName then
+                                BuffMe_Debug("Buff replacement (CLEU): \"" .. removedName ..
+                                    "\" → \"" .. spellName .. "\" — merging typeGroups")
+                                BuffMe_MergeTypeGroups(removedName, spellName)
+                            end
+                        end
+                        if not isNew then
+                            BuffMe_Debug("Aura applied: \"" .. spellName .. "\" (ID " .. spellId ..
+                                ") → " .. (destName or "?"))
+                        end
+                        lastCastAttempt = nil
+                        pendingCast = nil  -- CLEU handled it; cancel the UNIT_AURA fallback
+                        ScheduleRescan()
                     end
-                    lastCastAttempt = nil
-                    pendingCast = nil  -- CLEU handled it; cancel the UNIT_AURA fallback
-                    ScheduleRescan()
                 end
             elseif destGUID == playerGUID then
-                -- Buff landed on the player but from a non-player source; log in diag mode
-                -- so we can identify spells applied by totems, pets, procs, etc.
                 BuffMe_Debug("Untracked aura on player: \"" .. (spellName or "?") ..
                     "\" (ID " .. (spellId or "?") .. ") from " .. (sourceName or sourceGUID or "?"))
             end
@@ -290,6 +359,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 if spellName then
                     BuffMe_Debug("Aura lost: \"" .. spellName .. "\" (ID " .. (spellId or "?") ..
                         ") left " .. (destName or "?"))
+                    pendingRemovals[destGUID] = spellName  -- paired APPLIED may follow this frame
                     ScheduleRescan()
                 end
             elseif destGUID == playerGUID then
@@ -301,30 +371,28 @@ frame:SetScript("OnEvent", function(self, event, ...)
     end
 end)
 
--- Called by the UI button on left-click
-function BuffMe_Cast()
+-- Called by the UI button's PreClick handler to prepare the next cast.
+-- Sets lastCastAttempt and logs intent; returns (spellName, targetUnit) so the
+-- button's SecureActionButtonTemplate can perform the actual cast via attributes,
+-- bypassing the CastSpellByName restriction on Ascension's emulator.
+-- Returns (nil, nil) when there is nothing to cast.
+function BuffMe_PrepareCast()
     if inCombat then
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Cannot buff while in combat.")
-        return
+        return nil, nil
     end
 
     local spellId, targetUnit = BuffMe_GetNextCast()
     if not spellId or not targetUnit then
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r All party members are buffed!")
         RefreshUI()
-        return
+        return nil, nil
     end
 
     local entry = BuffMe_GetSpell(spellId)
-    if not entry then return end
+    if not entry then return nil, nil end
 
     BuffMe_Debug("Casting: \"" .. entry.name .. "\" on " .. targetUnit)
     lastCastAttempt = { spellId = spellId, unit = targetUnit, spellName = entry.name }
-
-    if targetUnit == "player" then
-        CastSpellByName(entry.name, true)  -- true = cast on self
-    else
-        TargetUnit(targetUnit)
-        CastSpellByName(entry.name)
-    end
+    return entry.name, targetUnit
 end

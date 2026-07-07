@@ -25,6 +25,19 @@ local function KeywordOverlap(name1, name2)
     return false
 end
 
+-- Wipe all learned spell data, preserving config settings and the diagnostic log.
+-- Use this to evict stale entries (e.g. proc-registered spells) and start fresh.
+function BuffMe_ResetSpellDB()
+    BuffMeDB.spells              = {}
+    BuffMeDB.nameToKey           = {}
+    BuffMeDB.auraToTypeGroup     = {}
+    BuffMeDB.typeGroupMembers    = {}
+    BuffMeDB.spellToTargetGroup  = {}
+    BuffMeDB.targetGroupMembers  = {}
+    BuffMeDB.spellToPlayerGroup  = {}
+    BuffMeDB.playerGroupMembers  = {}
+end
+
 function BuffMe_InitDB()
     BuffMeDB = BuffMeDB or {}
     -- [spellId] = { spellId, name, auraName, priority }
@@ -44,6 +57,10 @@ function BuffMe_InitDB()
     -- config settings
     if BuffMeDB.anchorLocked    == nil then BuffMeDB.anchorLocked    = false end
     if BuffMeDB.diagnosticMode  == nil then BuffMeDB.diagnosticMode  = false end
+    -- persistent diagnostic log (written to disk on /reload or logout)
+    BuffMeDB.diagnosticLog = BuffMeDB.diagnosticLog or {}
+    -- reverse name→key index for O(1) "already registered?" checks
+    BuffMeDB.nameToKey = BuffMeDB.nameToKey or {}
 end
 
 function BuffMe_GetSpell(spellId)
@@ -60,6 +77,7 @@ function BuffMe_RegisterSpell(spellId, spellName, auraName)
         auraName = auraName,
         priority = 5,
     }
+    BuffMeDB.nameToKey[spellName] = spellId  -- reverse index; any valid key works for lookup
 
     -- Bootstrap: each new aura gets its own typeGroup (will be merged later when we learn conflicts)
     local normalAura = BuffMe_NormalizeName(auraName)

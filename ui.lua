@@ -82,7 +82,7 @@ configIcon:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 -- ── Main button (inside container, bottom portion) ────────────────────────────
 
-local mainButton = CreateFrame("Button", "BuffMeButton", container, "UIPanelButtonTemplate")
+local mainButton = CreateFrame("Button", "BuffMeButton", container, "SecureActionButtonTemplate,UIPanelButtonTemplate")
 mainButton:SetHeight(BUTTON_HEIGHT)
 mainButton:SetPoint("BOTTOMLEFT",  container, "BOTTOMLEFT",  0, 0)
 mainButton:SetPoint("BOTTOMRIGHT", container, "BOTTOMRIGHT", 0, 0)
@@ -142,16 +142,34 @@ end)
 container:SetScript("OnMouseDown", pauseHover)
 container:SetScript("OnMouseUp",   resumeHover)
 
--- Button: clicks only; pause/resume hover during press, no drag
-mainButton:SetScript("OnMouseDown", function(self) pauseHover() end)
-mainButton:SetScript("OnMouseUp",   function(self) resumeHover() end)
+-- Button: clicks only; pause/resume hover during press, no drag.
+-- HookScript (not SetScript) avoids tainting the SecureActionButtonTemplate frame.
+mainButton:HookScript("OnMouseDown", function(self) pauseHover() end)
+mainButton:HookScript("OnMouseUp",   function(self) resumeHover() end)
 
 -- ── Button clicks ─────────────────────────────────────────────────────────────
+-- PreClick runs before the SecureActionButtonTemplate's native handler.
+-- It determines the spell and sets type/spell/unit attributes so the secure
+-- template can cast without ever calling the restricted CastSpellByName API.
+-- PostClick handles right-click (panel) since that has no secure action.
 
-mainButton:SetScript("OnClick", function(self, button)
-    if button == "LeftButton" then
-        BuffMe_Cast()
-    elseif button == "RightButton" then
+mainButton:SetScript("PreClick", function(self, mouseButton, down)
+    if mouseButton == "RightButton" then
+        self:SetAttribute("type", "")  -- suppress secure action; PostClick shows panel
+        return
+    end
+    local spellName, targetUnit = BuffMe_PrepareCast()
+    if not spellName then
+        self:SetAttribute("type", "")  -- nothing to cast
+        return
+    end
+    self:SetAttribute("type", "spell")
+    self:SetAttribute("spell", spellName)
+    self:SetAttribute("unit", targetUnit)
+end)
+
+mainButton:SetScript("PostClick", function(self, mouseButton)
+    if mouseButton == "RightButton" then
         BuffMe_TogglePanel()
     end
 end)

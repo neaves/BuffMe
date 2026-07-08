@@ -113,6 +113,10 @@ local function ScheduleRescan()
     rescanPending = true
 end
 
+function BuffMe_ForceRefresh()
+    RefreshUI()
+end
+
 -- Detect "more powerful spell" error strings (localization may vary on private servers)
 local ERROR_PATTERNS = {
     "more powerful",
@@ -226,58 +230,57 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- The spell name and aura name may differ (spell 10000 can apply aura 20000),
         -- so we use the diff list rather than name-matching.
         if pendingCast and unit == "player" then
-            local pending = pendingCast
-            pendingCast = nil
+            -- On Ascension, UNIT_AURA fires before CLEU. When a spell replaces another
+            -- (e.g. Boon of the Bear replaces Boon of the Lion), UNIT_AURA fires TWICE:
+            -- once for the removal (gained=[]) and once for the gain. Only consume
+            -- pendingCast when we see actual new buffs; otherwise keep it alive so the
+            -- second UNIT_AURA (or the CLEU APPLIED fallback) can complete registration.
+            if #gained > 0 then
+                local pending = pendingCast
+                pendingCast = nil
 
-            -- Pick the aura: prefer exact spell-name match, then sole new buff.
-            local auraName = nil
-            for _, buffName in ipairs(gained) do
-                if buffName == pending.name then auraName = buffName; break end
-            end
-            if not auraName and #gained == 1 then
-                auraName = gained[1]
-            end
+                -- Pick the aura: prefer exact spell-name match, then sole new buff.
+                local auraName = nil
+                for _, buffName in ipairs(gained) do
+                    if buffName == pending.name then auraName = buffName; break end
+                end
+                if not auraName and #gained == 1 then
+                    auraName = gained[1]
+                end
 
-            if auraName then
-                local sid = pending.spellId or FindSpellIdInBook(pending.name)
-                if not sid then
-                    -- Spell not found in spellbook: item interaction or passive effect.
-                    -- Do not register — the player cannot intentionally cast this.
-                    BuffMe_Debug("Skipped UNIT_AURA registration: \"" .. pending.name ..
-                        "\" not found in spellbook")
-                else
-                    BuffMe_RegisterSpell(sid, pending.name, auraName)
-                    -- Record last-cast preference (UNIT_AURA fallback is always player→player).
-                    local normalAura = BuffMe_NormalizeName(auraName)
-                    local tg = BuffMeDB.auraToTypeGroup[normalAura]
-                    if tg then BuffMe_RecordLastCast(tg, UnitName("player"), sid) end
-                    local idStr = type(sid) == "number" and ("ID " .. sid) or ("key \"" .. sid .. "\"")
-                    if auraName ~= pending.name then
-                        BuffMe_Debug("Registered via UNIT_AURA fallback: spell \"" .. pending.name ..
-                            "\" → aura \"" .. auraName .. "\" (" .. idStr .. ")")
-                    else
-                        BuffMe_Debug("Registered via UNIT_AURA fallback: \"" .. pending.name ..
-                            "\" (" .. idStr .. ")")
+                if auraName then
+                    local sid = pending.spellId or FindSpellIdInBook(pending.name)
+                    if not sid then
+                        -- Custom Ascension spell IDs (500000+) may not appear in the
+                        -- client's GetSpellBookItemInfo scan — the server and client use
+                        -- different ID spaces. Fall back to a synthetic string key, but
+                        -- only when UNIT_SPELLCAST_SENT confirmed this was an active player
+                        -- cast (that event doesn't fire for item/world-object interactions).
+                        if lastCastAttempt and lastCastAttempt.spellName == pending.name then
+                            sid = "__" .. pending.name
+                        else
+                            BuffMe_Debug("Skipped UNIT_AURA registration: \"" .. pending.name ..
+                                "\" — no matching active cast (item or passive effect)")
+                        end
                     end
-                end
-            elseif #gained > 1 then
-                BuffMe_Debug("Ambiguous registration after \"" .. pending.name .. "\": " ..
-                    #gained .. " new buffs — try casting when no other buffs are applied")
-            else
-                -- On Ascension, UNIT_AURA fires before CLEU, so SPELL_AURA_REFRESH
-                -- hasn't had a chance to clear pendingCast yet for known-spell refreshes.
-                -- Suppress the miss warning if the spell is already in the DB.
-                local known = (pending.spellId and BuffMeDB.spells[pending.spellId])
-                    or BuffMeDB.spells["__" .. pending.name]
-                    or BuffMeDB.nameToKey[pending.name]
-                if not known then
-                    for _, e in pairs(BuffMeDB.spells) do
-                        if e.name == pending.name then known = true; break end
+                    if sid then
+                        BuffMe_RegisterSpell(sid, pending.name, auraName)
+                        -- Record last-cast preference (UNIT_AURA fallback is always player→player).
+                        local normalAura = BuffMe_NormalizeName(auraName)
+                        local tg = BuffMeDB.auraToTypeGroup[normalAura]
+                        if tg then BuffMe_RecordLastCast(tg, UnitName("player"), sid) end
+                        local idStr = type(sid) == "number" and ("ID " .. sid) or ("key \"" .. sid .. "\"")
+                        if auraName ~= pending.name then
+                            BuffMe_Debug("Registered via UNIT_AURA fallback: spell \"" .. pending.name ..
+                                "\" → aura \"" .. auraName .. "\" (" .. idStr .. ")")
+                        else
+                            BuffMe_Debug("Registered via UNIT_AURA fallback: \"" .. pending.name ..
+                                "\" (" .. idStr .. ")")
+                        end
                     end
-                end
-                if not known then
-                    BuffMe_Debug("No new buff appeared after casting \"" .. pending.name ..
-                        "\" — not registered")
+                elseif #gained > 1 then
+                    BuffMe_Debug("Ambiguous registration after \"" .. pending.name .. "\": " ..
+                        #gained .. " new buffs — try casting when no other buffs are applied")
                 end
             end
         end
@@ -374,32 +377,16 @@ frame:SetScript("OnEvent", function(self, event, ...)
             -- "proc applied this with playerGUID as source".
             recentlyCastName = spellName
 
-            -- Retroactive cooldown check: spells registered before the cooldown filter
-            -- existed won't have ineligible set. Now that the spell was just cast, its
-            -- cooldown is active — check it and mark ineligible if warranted.
-            local existingKey = (spellId and BuffMeDB and BuffMeDB.spells[spellId] and spellId)
-                or (BuffMeDB and BuffMeDB.nameToKey and BuffMeDB.nameToKey[spellName])
-            if existingKey then
-                local existing = BuffMeDB.spells[existingKey]
-                if existing and not existing.ineligible then
-                    local cdKey = type(existingKey) == "number" and existingKey or spellName
-                    local _, cdDuration = GetSpellCooldown(cdKey)
-                    if cdDuration and cdDuration > 1.5 then
-                        existing.ineligible = true
-                        BuffMe_Debug("Retroactive cooldown (" .. cdDuration ..
-                            "s) — marked ineligible: \"" .. spellName .. "\"")
-                        ScheduleRescan()
-                    end
-                end
-            end
-
-            -- Queue a buff-scan registration for spells that don't appear in CLEU.
-            -- nameToKey covers spells registered via CLEU under a numeric key (the common
-            -- case where UNIT_SPELLCAST_SUCCEEDED carries no spellId but CLEU fires later).
-            local alreadyKnown = (spellId and BuffMeDB and BuffMeDB.spells[spellId])
-                or (BuffMeDB and (BuffMeDB.spells["__" .. spellName]
-                                  or BuffMeDB.nameToKey[spellName]))
-            if not alreadyKnown then
+            -- Queue a pending cast so the UNIT_AURA handler can confirm the buff landed
+            -- and record last-cast preferences. Skip queueing only for spells already
+            -- known under a numeric key (i.e. CLEU-backed) — CLEU records their preferences
+            -- independently. Synthetic-key spells (CLEU-less, like Grove Instinct) must
+            -- always queue so subsequent casts can still update preferences via UNIT_AURA.
+            local numericKey = (spellId and BuffMeDB and BuffMeDB.spells[spellId] and spellId)
+                or (BuffMeDB and BuffMeDB.nameToKey
+                    and type(BuffMeDB.nameToKey[spellName]) == "number"
+                    and BuffMeDB.nameToKey[spellName])
+            if not numericKey then
                 pendingCast = { name = spellName, spellId = spellId }
             end
         end
@@ -437,16 +424,17 @@ frame:SetScript("OnEvent", function(self, event, ...)
             if sourceGUID == playerGUID then
                 if spellId and spellName then
                     local isNew = not BuffMeDB.spells[spellId]
-                    if isNew and recentlyCastName ~= spellName then
-                        -- No matching UNIT_SPELLCAST_SUCCEEDED this frame → likely a passive
-                        -- proc or reactive ability rather than something the player can cast.
-                        BuffMe_Debug("Skipped registration (proc?): \"" .. spellName ..
-                            "\" (ID " .. spellId .. ") — no active cast for this spell this frame")
-                    elseif isNew and not FindSpellIdInBook(spellName) then
-                        -- Active cast but spell is not in the player's spellbook (item interaction,
-                        -- world object, or NPC-granted effect that fires with playerGUID as source).
-                        BuffMe_Debug("Skipped registration (not in spellbook): \"" .. spellName ..
-                            "\" (ID " .. spellId .. ")")
+                    if isNew and not (lastCastAttempt and lastCastAttempt.spellName == spellName) then
+                        -- UNIT_SPELLCAST_SENT is the authoritative signal that the player issued a
+                        -- deliberate cast from an action bar or button; it sets lastCastAttempt.
+                        -- World/quest item interactions fire UNIT_SPELLCAST_SUCCEEDED (which set
+                        -- recentlyCastName) but NOT UNIT_SPELLCAST_SENT, so lastCastAttempt is
+                        -- never populated for them. Passive procs set neither. Requiring
+                        -- lastCastAttempt to match is the tightest safe gate for new-spell
+                        -- registration — it survives the OnUpdate timing gap (recentlyCastName
+                        -- cleared before CLEU fires) and still rejects world-object auras.
+                        BuffMe_Debug("Skipped registration (proc/item): \"" .. spellName ..
+                            "\" (ID " .. spellId .. ") — no matching UNIT_SPELLCAST_SENT")
                     else
                         BuffMe_RegisterSpell(spellId, spellName, spellName)
                         -- Record last-cast preference for this typeGroup/target pair.

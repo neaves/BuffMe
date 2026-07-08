@@ -25,6 +25,27 @@ local function ScanPartyAuras()
                 }
                 i = i + 1
             end
+
+            -- Tracking abilities (Find Herbs, Find Minerals, etc.) are flagged isTracking
+            -- at registration because UnitBuff never returns them. For the player only,
+            -- check GetTrackingInfo to inject active tracking into the aura map so the
+            -- optimizer doesn't see them as perpetually missing.
+            if unit == "player" then
+                for j = 1, GetNumTrackingTypes() do
+                    local trackName, _, isActive = GetTrackingInfo(j)
+                    if isActive and trackName and BuffMeDB.nameToKey[trackName] then
+                        local normalName = BuffMe_NormalizeName(trackName)
+                        if not auraMap[unit][normalName] then
+                            local typeGroup = BuffMeDB.auraToTypeGroup[normalName] or normalName
+                            auraMap[unit][normalName] = {
+                                auraName  = trackName,
+                                caster    = "player",
+                                typeGroup = typeGroup,
+                            }
+                        end
+                    end
+                end
+            end
         end
     end
     return auraMap

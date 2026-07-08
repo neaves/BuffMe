@@ -97,46 +97,87 @@ end
 function BuffMe_RegisterSpell(spellId, spellName, auraName)
     if BuffMeDB.spells[spellId] then return end  -- already known
 
-    -- Spells with a cooldown beyond the GCD (1.5 s) are combat/emergency buttons;
-    -- flag them so they are excluded from the auto-buff rotation.
-    local cdKey = type(spellId) == "number" and spellId or spellName
-    local _, cdDuration = GetSpellCooldown(cdKey)
-    local hasCooldown = cdDuration and cdDuration > 1.5 or nil
-
-    BuffMeDB.spells[spellId] = {
-        spellId    = spellId,
-        name       = spellName,
-        auraName   = auraName,
-        priority   = 5,
-        ineligible = hasCooldown,
+    local entry = {
+        spellId  = spellId,
+        name     = spellName,
+        auraName = auraName,
+        priority = 5,
     }
+    BuffMeDB.spells[spellId] = entry
     BuffMeDB.nameToKey[spellName] = spellId  -- reverse index; any valid key works for lookup
 
-    -- Bootstrap: each new aura gets its own typeGroup (will be merged later when we learn conflicts)
+    -- Bootstrap typeGroup for this new aura. Before creating a fresh group, scan the
+    -- existing DB for any aura that shares a meaningful keyword (>3 chars) with this one.
+    -- Spells with overlapping names (e.g. "Boon of the Bear" / "Boon of the Wolf", or
+    -- "Grove Instinct" / "Primal Instinct") are very likely mutually exclusive variants
+    -- of the same effect — pre-group them immediately so the optimizer treats them as a
+    -- single covered slot from the very first cast, without needing to observe a replacement.
     local normalAura = BuffMe_NormalizeName(auraName)
     if not BuffMeDB.auraToTypeGroup[normalAura] then
-        local typeGroup = normalAura
-        BuffMeDB.auraToTypeGroup[normalAura] = typeGroup
-        BuffMeDB.typeGroupMembers[typeGroup] = { normalAura }
+        local matchedTG = nil
+        for _, existingEntry in pairs(BuffMeDB.spells) do
+            if KeywordOverlap(auraName, existingEntry.auraName) then
+                local en = BuffMe_NormalizeName(existingEntry.auraName)
+                matchedTG = BuffMeDB.auraToTypeGroup[en]
+                if matchedTG then break end
+            end
+        end
+        if matchedTG then
+            BuffMeDB.auraToTypeGroup[normalAura] = matchedTG
+            local members = BuffMeDB.typeGroupMembers[matchedTG]
+            if members then
+                local found = false
+                for _, m in ipairs(members) do
+                    if m == normalAura then found = true; break end
+                end
+                if not found then table.insert(members, normalAura) end
+            end
+            BuffMe_Debug("Pre-grouped \"" .. auraName .. "\" into typeGroup \"" ..
+                matchedTG .. "\" (keyword overlap)")
+        else
+            local typeGroup = normalAura
+            BuffMeDB.auraToTypeGroup[normalAura] = typeGroup
+            BuffMeDB.typeGroupMembers[typeGroup] = { normalAura }
+        end
     end
 
-    if hasCooldown then
-        BuffMe_Debug("Spell learned — INELIGIBLE (cooldown " .. cdDuration ..
-            "s): \"" .. spellName .. "\" (key " .. tostring(spellId) .. ")")
-    else
-        BuffMe_Debug("Spell learned: " .. spellName .. " (key " .. tostring(spellId) ..
-            ", typeGroup: " .. BuffMeDB.auraToTypeGroup[normalAura] .. ")")
+    -- Tracking abilities (Find Herbs, Find Minerals, etc.) don't appear in UnitBuff.
+    -- Detect them via GetTrackingInfo and flag them so the optimizer can use
+    -- the correct API to check their active state, and only considers them for the player.
+    for i = 1, GetNumTrackingTypes() do
+        local trackName = GetTrackingInfo(i)
+        if trackName == spellName then
+            entry.selfOnly   = true
+            entry.isTracking = true
+            BuffMe_Debug("Tracking ability detected: \"" .. spellName ..
+                "\" (self-only, active state via GetTrackingInfo)")
+            break
+        end
     end
+
+    BuffMe_Debug("Spell learned: " .. spellName .. " (key " .. tostring(spellId) ..
+        ", typeGroup: " .. BuffMeDB.auraToTypeGroup[normalAura] .. ")")
 end
 
 -- Mark a spell as self-only: its buff always applies to the caster regardless of target.
 -- Detected when SPELL_AURA_APPLIED lands on the player despite being aimed at someone else.
 -- Persists in SavedVariables; the optimizer will only ever suggest casting it on "player".
+-- Also propagates the flag to all other entries with the same spell name — one CLEU event
+-- may register the same spell under multiple IDs (e.g. Boon of the Lion applying to the
+-- player as ID 504856 and to their companion as ID 505217). When either is self-only, all are.
 function BuffMe_MarkSelfOnly(key)
     local entry = BuffMeDB.spells[key]
     if entry and not entry.selfOnly then
         entry.selfOnly = true
         BuffMe_Debug("Marked self-only: \"" .. entry.name .. "\"")
+        local sameName = entry.name
+        for otherKey, otherEntry in pairs(BuffMeDB.spells) do
+            if otherKey ~= key and otherEntry.name == sameName and not otherEntry.selfOnly then
+                otherEntry.selfOnly = true
+                BuffMe_Debug("Co-marked self-only: \"" .. otherEntry.name ..
+                    "\" (key " .. tostring(otherKey) .. ")")
+            end
+        end
         return true
     end
     return false
@@ -179,6 +220,19 @@ function BuffMe_MergeTypeGroups(auraName1, auraName2)
         end
     end
     BuffMeDB.typeGroupMembers[tg2] = nil
+
+    -- Migrate per-target cast preferences so lookups against tg1 find entries
+    -- that were recorded under tg2 before the merge. Don't overwrite tg1 entries
+    -- (tg1's preferences are more recent / more canonical).
+    local src = BuffMeDB.lastCastForGroup[tg2]
+    if src then
+        local dst = BuffMeDB.lastCastForGroup[tg1] or {}
+        BuffMeDB.lastCastForGroup[tg1] = dst
+        for target, key in pairs(src) do
+            if not dst[target] then dst[target] = key end
+        end
+        BuffMeDB.lastCastForGroup[tg2] = nil
+    end
 end
 
 -- Link two spell IDs into the same targetGroup (they are mutually exclusive on any single target)
@@ -273,8 +327,9 @@ function BuffMe_FindBlockingBuff(targetUnit, ourSpellName)
     return nil
 end
 
--- Return all spell entries that are currently in the player's spellbook and eligible
--- for auto-buffing (not flagged ineligible due to cooldown or hostile-target requirement).
+-- Return all spell entries that are currently castable: known, eligible, and off cooldown.
+-- Cooldown is checked by spell NAME (not numeric ID) because on Ascension the cast spell
+-- ID and the buff aura ID often differ — name-based lookup reliably finds the cast spell.
 function BuffMe_GetKnownBuffSpells()
     local result = {}
     for key, entry in pairs(BuffMeDB.spells) do
@@ -286,7 +341,14 @@ function BuffMe_GetKnownBuffSpells()
                 available = GetSpellInfo(entry.name) ~= nil
             end
             if available then
-                table.insert(result, entry)
+                -- Skip spells currently on a real cooldown (longer than the GCD).
+                -- Using spell name instead of ID because Ascension's cast and aura
+                -- spell IDs often differ; name-based lookup always finds the cast spell.
+                local start, duration = GetSpellCooldown(entry.name)
+                local onCooldown = start and start > 0 and duration and duration > 1.5
+                if not onCooldown then
+                    table.insert(result, entry)
+                end
             end
         end
     end

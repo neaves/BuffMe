@@ -131,6 +131,7 @@ resetDBBtn:SetText("Reset Spell Database")
 resetDBBtn:SetScript("OnClick", function()
     if not BuffMeDB then return end
     BuffMe_ResetSpellDB()
+    if BuffMe_ForceRefresh then BuffMe_ForceRefresh() end
     DEFAULT_CHAT_FRAME:AddMessage(
         "|cff00ccff[Buff Me]|r Spell database reset. " ..
         "Spells will be re-learned as you cast them.")

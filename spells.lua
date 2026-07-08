@@ -58,6 +58,8 @@ function BuffMe_InitDB()
     -- config settings
     if BuffMeDB.anchorLocked    == nil then BuffMeDB.anchorLocked    = false end
     if BuffMeDB.diagnosticMode  == nil then BuffMeDB.diagnosticMode  = false end
+    if BuffMeDB.showTargetIcon  == nil then BuffMeDB.showTargetIcon  = true  end
+    if BuffMeDB.showSpellIcon   == nil then BuffMeDB.showSpellIcon   = true  end
     -- persistent diagnostic log (written to disk on /reload or logout)
     BuffMeDB.diagnosticLog = BuffMeDB.diagnosticLog or {}
     -- reverse name→key index for O(1) "already registered?" checks
@@ -125,6 +127,19 @@ function BuffMe_RegisterSpell(spellId, spellName, auraName)
         BuffMe_Debug("Spell learned: " .. spellName .. " (key " .. tostring(spellId) ..
             ", typeGroup: " .. BuffMeDB.auraToTypeGroup[normalAura] .. ")")
     end
+end
+
+-- Mark a spell as self-only: its buff always applies to the caster regardless of target.
+-- Detected when SPELL_AURA_APPLIED lands on the player despite being aimed at someone else.
+-- Persists in SavedVariables; the optimizer will only ever suggest casting it on "player".
+function BuffMe_MarkSelfOnly(key)
+    local entry = BuffMeDB.spells[key]
+    if entry and not entry.selfOnly then
+        entry.selfOnly = true
+        BuffMe_Debug("Marked self-only: \"" .. entry.name .. "\"")
+        return true
+    end
+    return false
 end
 
 -- Mark a spell ineligible for auto-buffing (hostile-target requirement, cooldown, etc.).

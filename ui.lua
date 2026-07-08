@@ -4,13 +4,16 @@ local PANEL_WIDTH    = 280
 local FADE_TIME      = CHAT_FRAME_FADE_TIME or 0.5
 local BUTTON_HEIGHT  = 30
 local TITLE_HEIGHT   = 16
+local ICON_STEP      = 30   -- 28px icon + 2px gap
+local BTN_WIDTH      = 90
+local ICON_MARGIN    = 2    -- left margin when any icon is shown
 
 -- ── Container: encloses both title tab and button ─────────────────────────────
 -- Sized to cover the full hover area so IsMouseOver() stays true while the
 -- mouse travels between the button and the title tab above it.
 
 local container = CreateFrame("Frame", "BuffMeContainer", UIParent)
-container:SetWidth(90)
+container:SetWidth(BTN_WIDTH + 2 * ICON_STEP + ICON_MARGIN)  -- both icons shown by default
 container:SetHeight(TITLE_HEIGHT + BUTTON_HEIGHT)  -- 46
 container:SetMovable(true)
 container:EnableMouse(true)
@@ -80,11 +83,66 @@ configIcon:SetScript("OnEnter", function(self)
 end)
 configIcon:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
+-- ── Pending-cast preview icons ────────────────────────────────────────────────
+-- Left icon: portrait of the unit about to be buffed.
+-- Right icon: spell icon for the spell about to be cast.
+-- Both updated by BuffMe_UpdatePreviewIcons() on each UI refresh.
+
+local pendingSpellId  = nil
+local pendingUnit     = nil
+local lastLayoutState = nil   -- cached (showTarget*2 + showSpell) to skip redundant layout work
+
+local function CreatePreviewIcon(name)
+    local f = CreateFrame("Frame", name, container)
+    f:SetSize(28, 28)
+    f:SetBackdrop({
+        bgFile   = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = "Interface\\Buttons\\WHITE8x8",
+        tile = true, tileSize = 8, edgeSize = 1,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    f:SetBackdropColor(0, 0, 0, 1)
+    f:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+    f:EnableMouse(true)
+    f:Hide()
+
+    local tex = f:CreateTexture(nil, "ARTWORK")
+    tex:SetPoint("TOPLEFT",     f, "TOPLEFT",     1, -1)
+    tex:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -1,  1)
+
+    return f, tex
+end
+
+local targetIcon, targetPortrait = CreatePreviewIcon("BuffMeTargetIcon")
+targetIcon:SetPoint("BOTTOMLEFT", container, "BOTTOMLEFT", 2, 1)
+targetIcon:SetScript("OnEnter", function(self)
+    if not pendingUnit or not UnitExists(pendingUnit) then return end
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:SetUnit(pendingUnit)
+    GameTooltip:Show()
+end)
+targetIcon:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+local spellIcon, spellTexture = CreatePreviewIcon("BuffMeSpellIcon")
+spellIcon:SetPoint("BOTTOMLEFT", container, "BOTTOMLEFT", 32, 1)  -- 2+28+2
+spellIcon:SetScript("OnEnter", function(self)
+    if not pendingSpellId then return end
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    if type(pendingSpellId) == "number" then
+        GameTooltip:SetHyperlink("spell:" .. pendingSpellId)
+    else
+        local entry = BuffMe_GetSpell(pendingSpellId)
+        if entry then GameTooltip:SetText(entry.name, 1, 1, 1) end
+    end
+    GameTooltip:Show()
+end)
+spellIcon:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
 -- ── Main button (inside container, bottom portion) ────────────────────────────
 
 local mainButton = CreateFrame("Button", "BuffMeButton", container, "SecureActionButtonTemplate,UIPanelButtonTemplate")
 mainButton:SetHeight(BUTTON_HEIGHT)
-mainButton:SetPoint("BOTTOMLEFT",  container, "BOTTOMLEFT",  0, 0)
+mainButton:SetWidth(90)
 mainButton:SetPoint("BOTTOMRIGHT", container, "BOTTOMRIGHT", 0, 0)
 mainButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 mainButton:SetText("Buff Me!")
@@ -216,6 +274,77 @@ function BuffMe_UpdateBadge()
     end
 end
 
+-- Reposition icons and resize the container based on showTargetIcon / showSpellIcon flags.
+-- Skips work when nothing has changed (compares against lastLayoutState).
+function BuffMe_UpdateContainerLayout()
+    if not BuffMeDB then return end
+    local showT = BuffMeDB.showTargetIcon ~= false
+    local showS = BuffMeDB.showSpellIcon  ~= false
+    local state = (showT and 2 or 0) + (showS and 1 or 0)
+    if state == lastLayoutState then return end
+    lastLayoutState = state
+
+    local offset = ICON_MARGIN
+    if showT then
+        targetIcon:ClearAllPoints()
+        targetIcon:SetPoint("BOTTOMLEFT", container, "BOTTOMLEFT", offset, 1)
+        offset = offset + ICON_STEP
+    else
+        targetIcon:Hide()
+    end
+
+    if showS then
+        spellIcon:ClearAllPoints()
+        spellIcon:SetPoint("BOTTOMLEFT", container, "BOTTOMLEFT", offset, 1)
+    else
+        spellIcon:Hide()
+    end
+
+    local iconCount = (showT and 1 or 0) + (showS and 1 or 0)
+    container:SetWidth(BTN_WIDTH + iconCount * ICON_STEP + (iconCount > 0 and ICON_MARGIN or 0))
+end
+
+function BuffMe_UpdatePreviewIcons()
+    if not BuffMeDB then
+        targetIcon:Hide()
+        spellIcon:Hide()
+        return
+    end
+
+    local showT = BuffMeDB.showTargetIcon ~= false
+    local showS = BuffMeDB.showSpellIcon  ~= false
+
+    local spellId, unit = BuffMe_GetNextCast()
+    pendingSpellId = spellId
+    pendingUnit    = unit
+
+    if spellId and unit and UnitExists(unit) then
+        if showT then
+            SetPortraitTexture(targetPortrait, unit)
+            targetIcon:Show()
+        end
+        if showS then
+            local _, _, icon
+            if type(spellId) == "number" then
+                _, _, icon = GetSpellInfo(spellId)
+            else
+                local entry = BuffMe_GetSpell(spellId)
+                if entry then _, _, icon = GetSpellInfo(entry.name) end
+            end
+            if icon then
+                spellTexture:SetTexture(icon)
+                spellTexture:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                spellIcon:Show()
+            end
+        end
+    else
+        pendingSpellId = nil
+        pendingUnit    = nil
+        targetIcon:Hide()
+        spellIcon:Hide()
+    end
+end
+
 function BuffMe_RefreshPanel()
     if not panel:IsShown() or not BuffMeDB then return end
 
@@ -288,6 +417,8 @@ function BuffMe_SetCombatState(combat)
     if combat then
         mainButton:Disable()
         mainButton:SetText("In Combat")
+        targetIcon:Hide()
+        spellIcon:Hide()
     else
         mainButton:Enable()
         mainButton:SetText("Buff Me!")

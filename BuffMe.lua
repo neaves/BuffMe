@@ -93,8 +93,10 @@ frame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 frame:RegisterEvent("UNIT_SPELLCAST_SENT")
 
 local function RefreshUI()
-    if BuffMe_UpdateBadge  then BuffMe_UpdateBadge()  end
-    if BuffMe_RefreshPanel then BuffMe_RefreshPanel() end
+    if BuffMe_UpdateContainerLayout then BuffMe_UpdateContainerLayout() end
+    if BuffMe_UpdateBadge           then BuffMe_UpdateBadge()           end
+    if BuffMe_UpdatePreviewIcons    then BuffMe_UpdatePreviewIcons()    end
+    if BuffMe_RefreshPanel          then BuffMe_RefreshPanel()          end
 end
 
 -- Throttle: rescans accumulate and fire once per frame via OnUpdate
@@ -239,20 +241,24 @@ frame:SetScript("OnEvent", function(self, event, ...)
             if auraName then
                 local sid = pending.spellId or FindSpellIdInBook(pending.name)
                 if not sid then
-                    sid = "__" .. pending.name
-                end
-                BuffMe_RegisterSpell(sid, pending.name, auraName)
-                -- Record last-cast preference (UNIT_AURA fallback is always player→player).
-                local normalAura = BuffMe_NormalizeName(auraName)
-                local tg = BuffMeDB.auraToTypeGroup[normalAura]
-                if tg then BuffMe_RecordLastCast(tg, UnitName("player"), sid) end
-                local idStr = type(sid) == "number" and ("ID " .. sid) or ("key \"" .. sid .. "\"")
-                if auraName ~= pending.name then
-                    BuffMe_Debug("Registered via UNIT_AURA fallback: spell \"" .. pending.name ..
-                        "\" → aura \"" .. auraName .. "\" (" .. idStr .. ")")
+                    -- Spell not found in spellbook: item interaction or passive effect.
+                    -- Do not register — the player cannot intentionally cast this.
+                    BuffMe_Debug("Skipped UNIT_AURA registration: \"" .. pending.name ..
+                        "\" not found in spellbook")
                 else
-                    BuffMe_Debug("Registered via UNIT_AURA fallback: \"" .. pending.name ..
-                        "\" (" .. idStr .. ")")
+                    BuffMe_RegisterSpell(sid, pending.name, auraName)
+                    -- Record last-cast preference (UNIT_AURA fallback is always player→player).
+                    local normalAura = BuffMe_NormalizeName(auraName)
+                    local tg = BuffMeDB.auraToTypeGroup[normalAura]
+                    if tg then BuffMe_RecordLastCast(tg, UnitName("player"), sid) end
+                    local idStr = type(sid) == "number" and ("ID " .. sid) or ("key \"" .. sid .. "\"")
+                    if auraName ~= pending.name then
+                        BuffMe_Debug("Registered via UNIT_AURA fallback: spell \"" .. pending.name ..
+                            "\" → aura \"" .. auraName .. "\" (" .. idStr .. ")")
+                    else
+                        BuffMe_Debug("Registered via UNIT_AURA fallback: \"" .. pending.name ..
+                            "\" (" .. idStr .. ")")
+                    end
                 end
             elseif #gained > 1 then
                 BuffMe_Debug("Ambiguous registration after \"" .. pending.name .. "\": " ..
@@ -434,9 +440,13 @@ frame:SetScript("OnEvent", function(self, event, ...)
                     if isNew and recentlyCastName ~= spellName then
                         -- No matching UNIT_SPELLCAST_SUCCEEDED this frame → likely a passive
                         -- proc or reactive ability rather than something the player can cast.
-                        -- Log it in diagnostic mode but do not add it to the spell DB.
                         BuffMe_Debug("Skipped registration (proc?): \"" .. spellName ..
                             "\" (ID " .. spellId .. ") — no active cast for this spell this frame")
+                    elseif isNew and not FindSpellIdInBook(spellName) then
+                        -- Active cast but spell is not in the player's spellbook (item interaction,
+                        -- world object, or NPC-granted effect that fires with playerGUID as source).
+                        BuffMe_Debug("Skipped registration (not in spellbook): \"" .. spellName ..
+                            "\" (ID " .. spellId .. ")")
                     else
                         BuffMe_RegisterSpell(spellId, spellName, spellName)
                         -- Record last-cast preference for this typeGroup/target pair.
@@ -461,6 +471,19 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         if not isNew then
                             BuffMe_Debug("Aura applied: \"" .. spellName .. "\" (ID " .. spellId ..
                                 ") → " .. (destName or "?"))
+                        end
+                        -- Self-only detection: buff landed on the caster despite being aimed at
+                        -- someone else (e.g. "Boon of the Bear" — a toggle that only affects self).
+                        -- Mark it so the optimizer never suggests casting it on party members.
+                        if destGUID == playerGUID
+                        and lastCastAttempt
+                        and lastCastAttempt.unit ~= "player"
+                        and lastCastAttempt.spellName == spellName then
+                            local selfKey = lastCastAttempt.spellId or spellId
+                            if BuffMe_MarkSelfOnly(selfKey) then
+                                BuffMe_Debug("Self-only detected: \"" .. spellName ..
+                                    "\" landed on caster despite targeting " .. lastCastAttempt.unit)
+                            end
                         end
                         lastCastAttempt = nil
                         pendingCast = nil  -- CLEU handled it; cancel the UNIT_AURA fallback

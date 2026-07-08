@@ -58,16 +58,20 @@ local function SelectSpellForGroup(typeGroup, unit, knownSpells)
     local fallbackPriority = -1
 
     for _, entry in ipairs(knownSpells) do
-        local normalAura = BuffMe_NormalizeName(entry.auraName)
-        local entryTG    = BuffMeDB.auraToTypeGroup[normalAura] or normalAura
-        if entryTG == typeGroup then
-            if preferredKey and entry.spellId == preferredKey then
-                preferred = entry
-            end
-            local p = entry.priority or 5
-            if p > fallbackPriority then
-                fallbackPriority = p
-                fallback         = entry
+        -- Self-only spells (toggleable auras that only affect the caster) are never
+        -- cast on party members — skip them when evaluating non-player units.
+        if not (entry.selfOnly and unit ~= "player") then
+            local normalAura = BuffMe_NormalizeName(entry.auraName)
+            local entryTG    = BuffMeDB.auraToTypeGroup[normalAura] or normalAura
+            if entryTG == typeGroup then
+                if preferredKey and entry.spellId == preferredKey then
+                    preferred = entry
+                end
+                local p = entry.priority or 5
+                if p > fallbackPriority then
+                    fallbackPriority = p
+                    fallback         = entry
+                end
             end
         end
     end
@@ -180,9 +184,12 @@ function BuffMe_CountMissingBuffs()
             for _, auraData in pairs(unitAuras) do
                 coveredTG[auraData.typeGroup] = true
             end
-            for typeGroup in pairs(providers) do
-                if not coveredTG[typeGroup] then
-                    count = count + 1
+            for typeGroup, providerEntry in pairs(providers) do
+                -- Self-only spells only count as "missing" for the player, not party members.
+                if not (providerEntry.selfOnly and unit ~= "player") then
+                    if not coveredTG[typeGroup] then
+                        count = count + 1
+                    end
                 end
             end
         end

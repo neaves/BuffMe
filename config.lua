@@ -214,3 +214,396 @@ panel:SetScript("OnShow", function()
 end)
 
 InterfaceOptions_AddCategory(panel)
+
+-- ── Shared scroll-row pool helper ─────────────────────────────────────────────
+-- Creates Frame-based rows on demand and reuses them across refreshes.
+-- Each row is a fixed-height frame parented to `content` with a text label.
+local function MakeRowPool(content, rowHeight)
+    local pool = {}
+    return function(i)
+        if not pool[i] then
+            local f = CreateFrame("Frame", nil, content)
+            f:SetHeight(rowHeight)
+            f.text = f:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+            f.text:SetPoint("LEFT", 2, 0)
+            f.text:SetPoint("RIGHT", 0, 0)
+            f.text:SetJustifyH("LEFT")
+            pool[i] = f
+        end
+        return pool[i]
+    end, pool
+end
+
+-- ── SPELL GROUPS sub-panel ─────────────────────────────────────────────────────
+
+local groupsPanel = CreateFrame("Frame", "BuffMeGroupsPanel")
+groupsPanel.name   = "Spell Groups"
+groupsPanel.parent = "Buff Me"
+
+local gpTitle = groupsPanel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+gpTitle:SetPoint("TOPLEFT", 16, -16)
+gpTitle:SetText("Spell Groups")
+
+local gpDesc = groupsPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+gpDesc:SetPoint("TOPLEFT", gpTitle, "BOTTOMLEFT", 0, -6)
+gpDesc:SetText("Spells are organized into mutual-exclusivity groups. If any spell in a group is already active, all others in the group are skipped.")
+gpDesc:SetWidth(400)
+gpDesc:SetJustifyH("LEFT")
+
+local gpScroll = CreateFrame("ScrollFrame", "BuffMeGroupsScroll", groupsPanel, "UIPanelScrollFrameTemplate")
+gpScroll:SetPoint("TOPLEFT", gpDesc, "BOTTOMLEFT", 0, -10)
+gpScroll:SetPoint("BOTTOMRIGHT", groupsPanel, "BOTTOMRIGHT", -28, 8)
+
+local gpContent = CreateFrame("Frame", "BuffMeGroupsContent", gpScroll)
+gpContent:SetWidth(390)
+gpContent:SetHeight(1)
+gpScroll:SetScrollChild(gpContent)
+
+local GetGpRow, gpRowPool = MakeRowPool(gpContent, 16)
+
+local function RefreshGroupsPanel()
+    if not BuffMeDB or not BuffMeDB.typeGroupMembers then return end
+
+    -- Collect each unique typeGroup and the spells that belong to it
+    local groups = {}
+    for tg in pairs(BuffMeDB.typeGroupMembers) do
+        local spells = {}
+        for _, entry in pairs(BuffMeDB.spells) do
+            local normalAura = BuffMe_NormalizeName(entry.auraName)
+            if BuffMeDB.auraToTypeGroup[normalAura] == tg then
+                table.insert(spells, entry)
+            end
+        end
+        if #spells > 0 then
+            table.sort(spells, function(a, b) return a.name < b.name end)
+            table.insert(groups, { tg = tg, spells = spells })
+        end
+    end
+    table.sort(groups, function(a, b) return a.tg < b.tg end)
+
+    local rowIdx = 0
+    local y      = 0
+
+    for _, grp in ipairs(groups) do
+        -- Group header row
+        rowIdx = rowIdx + 1
+        local row = GetGpRow(rowIdx)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -y)
+        row:SetWidth(390)
+        row:Show()
+        local memberCount = #grp.spells
+        row.text:SetText(grp.tg .. "  (" .. memberCount .. " spell" .. (memberCount ~= 1 and "s" or "") .. ")")
+        row.text:SetTextColor(1, 0.82, 0)
+        y = y + 17
+
+        -- One row per spell in this group
+        for _, sp in ipairs(grp.spells) do
+            -- Fetch rank from the API (e.g. "Rank 2"); nil or "" means unranked
+            local rankStr
+            if type(sp.spellId) == "number" then
+                local _, r = GetSpellInfo(sp.spellId)
+                if r and r ~= "" then rankStr = r end
+            end
+
+            local flags = {}
+            if sp.selfOnly   then table.insert(flags, "self-only")  end
+            if sp.isTracking then table.insert(flags, "tracking")   end
+            if sp.ineligible then table.insert(flags, "ignored")    end
+            local suffix = #flags > 0 and ("  [" .. table.concat(flags, ", ") .. "]") or ""
+
+            local displayName = rankStr and (sp.name .. "  (" .. rankStr .. ")") or sp.name
+
+            rowIdx = rowIdx + 1
+            row = GetGpRow(rowIdx)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", 16, -y)
+            row:SetWidth(374)
+            row:Show()
+            row.text:SetText(displayName .. suffix)
+            if sp.ineligible then
+                row.text:SetTextColor(0.45, 0.45, 0.45)
+            else
+                row.text:SetTextColor(0.9, 0.9, 0.9)
+            end
+            y = y + 14
+        end
+        y = y + 5  -- gap between groups
+    end
+
+    -- Hide rows beyond what we used this pass
+    for i = rowIdx + 1, #gpRowPool do
+        gpRowPool[i]:Hide()
+    end
+
+    gpContent:SetHeight(math.max(y, 1))
+end
+
+groupsPanel:SetScript("OnShow", RefreshGroupsPanel)
+InterfaceOptions_AddCategory(groupsPanel)
+
+-- ── IGNORED SPELLS sub-panel ───────────────────────────────────────────────────
+
+local ignorePanel = CreateFrame("Frame", "BuffMeIgnorePanel")
+ignorePanel.name   = "Ignored Spells"
+ignorePanel.parent = "Buff Me"
+
+local ipTitle = ignorePanel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+ipTitle:SetPoint("TOPLEFT", 16, -16)
+ipTitle:SetText("Ignored Spells")
+
+local ipDesc = ignorePanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+ipDesc:SetPoint("TOPLEFT", ipTitle, "BOTTOMLEFT", 0, -6)
+ipDesc:SetText("Ignored spells are never suggested. Cast a spell at least once so it is learned, then enter its name below to exclude it permanently.")
+ipDesc:SetWidth(400)
+ipDesc:SetJustifyH("LEFT")
+
+-- Input bar pinned to the bottom of the panel
+local ipInputLabel = ignorePanel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+ipInputLabel:SetPoint("BOTTOMLEFT", ignorePanel, "BOTTOMLEFT", 16, 44)
+ipInputLabel:SetText("Spell name:")
+
+local ipInput = CreateFrame("EditBox", "BuffMeIgnoreInput", ignorePanel, "InputBoxTemplate")
+ipInput:SetSize(216, 20)
+ipInput:SetPoint("LEFT", ipInputLabel, "RIGHT", 8, 0)
+ipInput:SetAutoFocus(false)
+ipInput:SetMaxLetters(80)
+
+local ipApplyBtn = CreateFrame("Button", "BuffMeIgnoreApply", ignorePanel, "UIPanelButtonTemplate")
+ipApplyBtn:SetSize(80, 22)
+ipApplyBtn:SetPoint("LEFT", ipInput, "RIGHT", 6, 0)
+ipApplyBtn:SetText("Ignore")
+
+local ipFeedback = ignorePanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+ipFeedback:SetPoint("TOPLEFT", ipInputLabel, "TOPLEFT", 0, -22)
+ipFeedback:SetWidth(380)
+ipFeedback:SetJustifyH("LEFT")
+ipFeedback:SetTextColor(1, 0.4, 0.4)
+ipFeedback:SetText("")
+
+-- Scrollable list of ignored spells (above the input bar)
+local ipScroll = CreateFrame("ScrollFrame", "BuffMeIgnoreScroll", ignorePanel, "UIPanelScrollFrameTemplate")
+ipScroll:SetPoint("TOPLEFT", ipDesc, "BOTTOMLEFT", 0, -10)
+ipScroll:SetPoint("BOTTOMRIGHT", ignorePanel, "BOTTOMRIGHT", -28, 72)
+
+local ipContent = CreateFrame("Frame", "BuffMeIgnoreContent", ipScroll)
+ipContent:SetWidth(390)
+ipContent:SetHeight(1)
+ipScroll:SetScrollChild(ipContent)
+
+-- Ignored rows also carry an Unignore button
+local ipRowPool = {}
+local function GetIpRow(i)
+    if not ipRowPool[i] then
+        local f = CreateFrame("Frame", nil, ipContent)
+        f:SetHeight(22)
+        f.text = f:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        f.text:SetPoint("LEFT", 2, 0)
+        f.text:SetWidth(286)
+        f.text:SetJustifyH("LEFT")
+        f.unignoreBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.unignoreBtn:SetSize(90, 20)
+        f.unignoreBtn:SetPoint("RIGHT", f, "RIGHT", 0, 0)
+        f.unignoreBtn:SetText("Unignore")
+        ipRowPool[i] = f
+    end
+    return ipRowPool[i]
+end
+
+local function RefreshIgnorePanel()
+    if not BuffMeDB or not BuffMeDB.spells then return end
+
+    local ignored = {}
+    for key, entry in pairs(BuffMeDB.spells) do
+        if entry.ineligible then
+            table.insert(ignored, { key = key, entry = entry })
+        end
+    end
+    table.sort(ignored, function(a, b) return a.entry.name < b.entry.name end)
+
+    local y = 0
+    for i, item in ipairs(ignored) do
+        local row = GetIpRow(i)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -y)
+        row:SetWidth(390)
+        row:Show()
+        row.text:SetText(item.entry.name)
+        row.text:SetTextColor(0.9, 0.9, 0.9)
+        -- Capture key for the closure
+        local entryRef = item.entry
+        row.unignoreBtn:SetScript("OnClick", function()
+            entryRef.ineligible = nil
+            if BuffMe_ForceRefresh then BuffMe_ForceRefresh() end
+            ipFeedback:SetText("")
+            RefreshIgnorePanel()
+        end)
+        y = y + 22
+    end
+
+    for i = #ignored + 1, #ipRowPool do
+        ipRowPool[i]:Hide()
+    end
+
+    if #ignored == 0 then
+        ipContent:SetHeight(1)
+    else
+        ipContent:SetHeight(math.max(y, 1))
+    end
+end
+
+local function ApplyIgnore()
+    local name = ipInput:GetText():match("^%s*(.-)%s*$")
+    if name == "" then return end
+    if not BuffMeDB or not BuffMeDB.nameToKey then return end
+
+    local key = BuffMeDB.nameToKey[name]
+    local entry = key and BuffMeDB.spells[key]
+    if entry then
+        entry.ineligible = true
+        ipInput:SetText("")
+        ipFeedback:SetText("")
+        if BuffMe_ForceRefresh then BuffMe_ForceRefresh() end
+        RefreshIgnorePanel()
+    else
+        ipFeedback:SetText("\"" .. name .. "\" not found — cast it first so Buff Me can learn it.")
+    end
+end
+
+ipApplyBtn:SetScript("OnClick", ApplyIgnore)
+ipInput:SetScript("OnEnterPressed", ApplyIgnore)
+ipInput:SetScript("OnTextChanged", function() ipFeedback:SetText("") end)
+
+ignorePanel:SetScript("OnShow", function()
+    ipFeedback:SetText("")
+    RefreshIgnorePanel()
+end)
+InterfaceOptions_AddCategory(ignorePanel)
+
+-- ── EFFECT GROUPS sub-panel ───────────────────────────────────────────────────
+-- Shows every tooltip-signature group with all known spell/aura variants and their values.
+-- Groups are keyed by normalized tooltip sig; members are sorted strongest first.
+-- This lets you see which external buffs (e.g. "Whispers of Y'shaarj") the optimizer
+-- recognizes as sharing an effect with one of your spells (e.g. "Grove Instinct").
+
+local egPanel = CreateFrame("Frame", "BuffMeEffectGroupsPanel")
+egPanel.name   = "Effect Groups"
+egPanel.parent = "Buff Me"
+
+local egTitle = egPanel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+egTitle:SetPoint("TOPLEFT", 16, -16)
+egTitle:SetText("Effect Groups")
+
+local egDesc = egPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+egDesc:SetPoint("TOPLEFT", egTitle, "BOTTOMLEFT", 0, -6)
+egDesc:SetText("Effect families identified by tooltip pattern matching. Each group shows all spells and external auras that share the same effect, from any source. The number is the strongest value seen in each tooltip.")
+egDesc:SetWidth(400)
+egDesc:SetJustifyH("LEFT")
+
+local egScroll = CreateFrame("ScrollFrame", "BuffMeEffectGroupsScroll", egPanel, "UIPanelScrollFrameTemplate")
+egScroll:SetPoint("TOPLEFT", egDesc, "BOTTOMLEFT", 0, -10)
+egScroll:SetPoint("BOTTOMRIGHT", egPanel, "BOTTOMRIGHT", -28, 8)
+
+local egContent = CreateFrame("Frame", "BuffMeEffectGroupsContent", egScroll)
+egContent:SetWidth(390)
+egContent:SetHeight(1)
+egScroll:SetScrollChild(egContent)
+
+local GetEgRow, egRowPool = MakeRowPool(egContent, 16)
+
+local function RefreshEffectGroupsPanel()
+    if not BuffMeDB or not BuffMeDB.effectGroups then return end
+
+    -- Build set of castable aura names for colour distinction
+    local castableAuras = {}
+    if BuffMeDB.spells then
+        for _, entry in pairs(BuffMeDB.spells) do
+            castableAuras[BuffMe_NormalizeName(entry.auraName)] = true
+        end
+    end
+
+    -- Collect all effect groups and sort by typeGroup then sig
+    local groups = {}
+    for sig, egEntry in pairs(BuffMeDB.effectGroups) do
+        if next(egEntry.members) then
+            table.insert(groups, { sig = sig, tg = egEntry.typeGroup, members = egEntry.members })
+        end
+    end
+    table.sort(groups, function(a, b)
+        if a.tg ~= b.tg then return a.tg < b.tg end
+        return a.sig < b.sig
+    end)
+
+    local rowIdx = 0
+    local y      = 0
+
+    for _, grp in ipairs(groups) do
+        -- Build human-readable label from the first component of the sig
+        -- Sig lines are joined with "|"; take the first, capitalize it
+        local label = grp.sig:match("^([^|]+)") or grp.sig
+        label = label:sub(1,1):upper() .. label:sub(2)
+        if #label > 60 then label = label:sub(1, 57) .. "..." end
+
+        -- Count members
+        local memberCount = 0
+        for _ in pairs(grp.members) do memberCount = memberCount + 1 end
+
+        -- Group header
+        rowIdx = rowIdx + 1
+        local row = GetEgRow(rowIdx)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -y)
+        row:SetWidth(390)
+        row:Show()
+        row.text:SetText(label)
+        row.text:SetTextColor(1, 0.82, 0)
+        y = y + 17
+
+        -- Sort members alphabetically (value used for ordering intent but not displayed)
+        local sorted = {}
+        for normalName, data in pairs(grp.members) do
+            table.insert(sorted, { normalName = normalName, name = data.name, value = data.value or 0 })
+        end
+        table.sort(sorted, function(a, b) return a.name < b.name end)
+
+        for _, m in ipairs(sorted) do
+            local isCastable = castableAuras[m.normalName]
+
+            rowIdx = rowIdx + 1
+            row = GetEgRow(rowIdx)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", 16, -y)
+            row:SetWidth(374)
+            row:Show()
+            row.text:SetText(m.name)
+            if isCastable then
+                row.text:SetTextColor(0.9, 0.9, 0.9)
+            else
+                row.text:SetTextColor(0.6, 0.8, 1)  -- light blue for external sources
+            end
+            y = y + 14
+        end
+        y = y + 5
+    end
+
+    if rowIdx == 0 then
+        rowIdx = 1
+        local row = GetEgRow(1)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -y)
+        row:SetWidth(390)
+        row:Show()
+        row.text:SetText("No effect groups learned yet. Cast your buff spells and let Buff Me observe what gets blocked.")
+        row.text:SetTextColor(0.6, 0.6, 0.6)
+        y = y + 14
+    end
+
+    for i = rowIdx + 1, #egRowPool do
+        egRowPool[i]:Hide()
+    end
+
+    egContent:SetHeight(math.max(y, 1))
+end
+
+egPanel:SetScript("OnShow", RefreshEffectGroupsPanel)
+InterfaceOptions_AddCategory(egPanel)

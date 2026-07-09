@@ -134,9 +134,15 @@ spellIcon:SetScript("OnEnter", function(self)
         local entry = BuffMe_GetSpell(pendingSpellId)
         if entry then GameTooltip:SetText(entry.name, 1, 1, 1) end
     end
+    GameTooltip:AddLine("Right-click to ignore this spell", 0.7, 0.7, 0.7)
     GameTooltip:Show()
 end)
 spellIcon:SetScript("OnLeave", function() GameTooltip:Hide() end)
+spellIcon:SetScript("OnMouseUp", function(self, button)
+    if button ~= "RightButton" or not pendingSpellId then return end
+    BuffMe_MarkIneligible(pendingSpellId, "manual")
+    if BuffMe_ForceRefresh then BuffMe_ForceRefresh() end
+end)
 
 -- ── Main button (inside container, bottom portion) ────────────────────────────
 

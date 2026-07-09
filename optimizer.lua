@@ -6,8 +6,22 @@ local function IsUnitInRange(unit)
 end
 
 -- Scan all live party members' buffs.
--- Returns: { [unit] = { [normalizedAuraName] = { auraName, caster, typeGroup } } }
+-- Returns: { [unit] = { [normalizedAuraName] = { auraName, caster, typeGroup, effectSig } } }
+-- effectSig is set only for external buffs (caster ~= "player") matched via effectGroups.
+-- It lets GetNextCast distinguish "our spell covers the typeGroup" from "an external buff
+-- covers only this specific effect sig" — the latter still leaves room for sibling spells
+-- in the same typeGroup whose effects haven't been covered.
 local function ScanPartyAuras()
+    -- Build a reverse index: normalName → sig, from the persisted effectGroups table.
+    -- This lets us tag already-registered external buffs with their sig in O(1) without
+    -- re-reading tooltips on every scan (tooltip reads are only needed for truly new buffs).
+    local effectSigByNorm = {}
+    for sig, egEntry in pairs(BuffMeDB.effectGroups) do
+        for normalName in pairs(egEntry.members) do
+            effectSigByNorm[normalName] = sig
+        end
+    end
+
     local auraMap = {}
     for _, unit in ipairs(PARTY_UNITS) do
         if UnitExists(unit) then
@@ -17,11 +31,30 @@ local function ScanPartyAuras()
                 local buffName, _, _, _, _, _, _, casterUnit = UnitBuff(unit, i)
                 if not buffName then break end
                 local normalName = BuffMe_NormalizeName(buffName)
-                local typeGroup  = BuffMeDB.auraToTypeGroup[normalName] or normalName
+                local typeGroup = BuffMeDB.auraToTypeGroup[normalName]
+                if not typeGroup and next(BuffMeDB.effectGroups) then
+                    -- Unknown buff: try to identify it via effectGroup tooltip matching
+                    local sig, value = BuffMe_GetUnitBuffInfo(unit, i)
+                    if sig and sig ~= "" then
+                        local egEntry = BuffMeDB.effectGroups[sig]
+                        if egEntry then
+                            BuffMe_RegisterAuraInTypeGroup(buffName, egEntry.typeGroup)
+                            BuffMe_RegisterInEffectGroup(sig, egEntry.typeGroup, normalName, buffName, value)
+                            typeGroup = egEntry.typeGroup
+                            effectSigByNorm[normalName] = sig  -- index for this session
+                            BuffMe_Debug("Effect group match: \"" .. buffName .. "\" → typeGroup \"" .. egEntry.typeGroup .. "\"")
+                        end
+                    end
+                end
+                typeGroup = typeGroup or normalName
+                -- effectSig: only meaningful for non-player casters; used by GetNextCast
+                -- to cover only the specific effect sig rather than the whole typeGroup.
+                local effectSig = (casterUnit ~= "player") and effectSigByNorm[normalName] or nil
                 auraMap[unit][normalName] = {
                     auraName  = buffName,
                     caster    = casterUnit,
                     typeGroup = typeGroup,
+                    effectSig = effectSig,
                 }
                 i = i + 1
             end
@@ -68,9 +101,12 @@ function BuffMe_GetProviderTypeGroups()
 end
 
 -- Pick which spell to cast for a typeGroup on a specific unit.
--- Prefers the spell last successfully cast on that target in this typeGroup (if still
--- available in the spellbook), then falls back to the highest-priority castable spell.
-local function SelectSpellForGroup(typeGroup, unit, knownSpells)
+-- coveredSigs: set of effect sigs already covered by external buffs on this unit.
+--   Spells whose tooltipSig appears in coveredSigs are skipped — their effect is already
+--   provided by a stronger external source. Other spells in the same typeGroup (with
+--   different sigs) remain valid so the optimizer can still fill a useful buff slot.
+-- Falls back to highest-priority castable spell whose effect isn't already covered.
+local function SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
     local targetName   = UnitName(unit)
     local preferredKey = BuffMe_GetPreferredSpellKey(typeGroup, targetName)
 
@@ -85,13 +121,19 @@ local function SelectSpellForGroup(typeGroup, unit, knownSpells)
             local normalAura = BuffMe_NormalizeName(entry.auraName)
             local entryTG    = BuffMeDB.auraToTypeGroup[normalAura] or normalAura
             if entryTG == typeGroup then
-                if preferredKey and entry.spellId == preferredKey then
-                    preferred = entry
-                end
-                local p = entry.priority or 5
-                if p > fallbackPriority then
-                    fallbackPriority = p
-                    fallback         = entry
+                -- Skip if this spell's specific effect is already covered by an external
+                -- buff (e.g. "Whispers of Y'shaarj" covers "Grove Instinct"'s sig, but
+                -- not "Primal Instinct"'s sig — so Primal remains a valid candidate).
+                local sigCovered = entry.tooltipSig and coveredSigs[entry.tooltipSig]
+                if not sigCovered then
+                    if preferredKey and entry.spellId == preferredKey then
+                        preferred = entry
+                    end
+                    local p = entry.priority or 5
+                    if p > fallbackPriority then
+                        fallbackPriority = p
+                        fallback         = entry
+                    end
                 end
             end
         end
@@ -129,24 +171,36 @@ function BuffMe_GetNextCast()
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and IsUnitInRange(unit) then
             local unitAuras = auraMap[unit] or {}
 
-            -- Build covered typeGroup set for this unit (covered by ANY caster)
-            local coveredTG = {}
+            -- Split coverage into two buckets:
+            --   coveredTG  — typeGroup fully blocked (our own spell is up, or another
+            --                player's registered spell covers the slot)
+            --   coveredSigs — specific effect sigs covered by external effectGroup-matched
+            --                 buffs (e.g. "Whispers of Y'shaarj" has same sig as Grove
+            --                 Instinct). These block only that sig; sibling spells in the
+            --                 same typeGroup with different sigs remain valid candidates.
+            local coveredTG   = {}
+            local coveredSigs = {}
             for _, auraData in pairs(unitAuras) do
-                coveredTG[auraData.typeGroup] = true
+                if auraData.effectSig then
+                    coveredSigs[auraData.effectSig] = true
+                else
+                    coveredTG[auraData.typeGroup] = true
+                end
             end
 
             for typeGroup in pairs(providers) do
                 local shouldSkip = false
 
-                -- Skip if this typeGroup is already covered on this unit
+                -- Skip if this typeGroup is already fully covered (our spell is up)
                 if coveredTG[typeGroup] then
                     shouldSkip = true
                 end
 
-                -- Select the preferred (or best available) spell for this unit/typeGroup
+                -- Select the preferred (or best available) spell for this unit/typeGroup,
+                -- excluding spells whose specific effect sig is already externally covered.
                 local selectedEntry = nil
                 if not shouldSkip then
-                    selectedEntry = SelectSpellForGroup(typeGroup, unit, knownSpells)
+                    selectedEntry = SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
                     if not selectedEntry then shouldSkip = true end
                 end
 
@@ -196,20 +250,29 @@ end
 function BuffMe_CountMissingBuffs()
     local count    = 0
     local auraMap  = ScanPartyAuras()
-    local providers = BuffMe_GetProviderTypeGroups()
+    local providers, knownSpells = BuffMe_GetProviderTypeGroups()
 
     for _, unit in ipairs(PARTY_UNITS) do
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and IsUnitInRange(unit) then
             local unitAuras = auraMap[unit] or {}
-            local coveredTG = {}
+            local coveredTG   = {}
+            local coveredSigs = {}
             for _, auraData in pairs(unitAuras) do
-                coveredTG[auraData.typeGroup] = true
+                if auraData.effectSig then
+                    coveredSigs[auraData.effectSig] = true
+                else
+                    coveredTG[auraData.typeGroup] = true
+                end
             end
             for typeGroup, providerEntry in pairs(providers) do
-                -- Self-only spells only count as "missing" for the player, not party members.
                 if not (providerEntry.selfOnly and unit ~= "player") then
                     if not coveredTG[typeGroup] then
-                        count = count + 1
+                        -- typeGroup not fully covered; count as missing only if at least
+                        -- one spell in it has an uncovered (or unknown) effect sig.
+                        local hasCastable = SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
+                        if hasCastable then
+                            count = count + 1
+                        end
                     end
                 end
             end

@@ -3,6 +3,112 @@ function BuffMe_NormalizeName(name)
     return name:lower():gsub("[^%a%d]", "")
 end
 
+-- Tooltip scan frame, created once on first use
+local scanTT
+local function GetScanTT()
+    if scanTT then return scanTT end
+    scanTT = CreateFrame("GameTooltip", "BuffMeScanTT", nil, "GameTooltipTemplate")
+    scanTT:SetOwner(WorldFrame, "ANCHOR_NONE")
+    return scanTT
+end
+
+-- Strip WoW color-code markup from a string (|cAARRGGBB...text...|r).
+-- Unit buff tooltips can contain color codes (e.g. Boon descriptions), so we strip
+-- them before building sigs to keep comparisons format-independent.
+local function StripColorCodes(text)
+    return text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+end
+
+-- Reduce a tooltip line to a comparable signature: lowercase, all digit runs → "#"
+local function NormTooltipLine(text)
+    return (text:lower():gsub("%d+", "#"):gsub("%s+", " "):match("^(.-)%s*$"))
+end
+
+-- Collect body lines (2+) from the scan frame, stripping color codes.
+-- We only call this on unit-buff tooltips (SetUnitBuff), which don't have
+-- mana-cost or cast-time lines, so no metadata filtering is needed here.
+local function ReadScanTTLines(tt)
+    local lines = {}
+    for line = 2, tt:NumLines() do
+        local obj = _G["BuffMeScanTTTextLeft" .. line]
+        if obj then
+            local t = obj:GetText()
+            if t and t ~= "" then
+                t = StripColorCodes(t)
+                local trimmed = t:match("^%s*(.-)%s*$")
+                if trimmed ~= "" then lines[#lines + 1] = trimmed end
+            end
+        end
+    end
+    return lines
+end
+
+-- Normalize raw lines into a pipe-joined comparison signature (digits → #)
+local function LinesToSig(lines)
+    local parts = {}
+    for _, t in ipairs(lines) do parts[#parts + 1] = NormTooltipLine(t) end
+    return table.concat(parts, "|")
+end
+
+-- Extract the largest numeric value from raw tooltip lines for strength comparison
+local function LinesToValue(lines)
+    local best = 0
+    for _, t in ipairs(lines) do
+        for n in t:gmatch("%d+%.?%d*") do
+            local v = tonumber(n)
+            if v and v > best then best = v end
+        end
+    end
+    return best
+end
+
+-- Return the cached aura-sourced sig and value for a spell entry.
+-- Sigs are populated by BuffMe_CaptureAuraTooltip when a buff is observed landing;
+-- returns nil/nil until the spell has been cast and the aura seen at least once.
+function BuffMe_GetOurSpellInfo(entry)
+    return entry.tooltipSig, entry.tooltipValue
+end
+
+-- Scan a unit's live buff list for entry.auraName, read its tooltip via SetUnitBuff,
+-- and cache the sig+value on the entry. Also registers the entry in effectGroups.
+-- Called from the CLEU SPELL_AURA_APPLIED and UNIT_AURA fallback handlers immediately
+-- after a buff from the player is confirmed as landed on a unit.
+function BuffMe_CaptureAuraTooltip(unit, entry)
+    if entry.tooltipSig then return end  -- already captured
+    if not UnitExists(unit) then return end
+    local i = 1
+    while true do
+        local buffName = UnitBuff(unit, i)
+        if not buffName then break end
+        if buffName == entry.auraName then
+            local sig, value = BuffMe_GetUnitBuffInfo(unit, i)
+            if sig and sig ~= "" then
+                entry.tooltipSig   = sig
+                entry.tooltipValue = value
+                local normalAura = BuffMe_NormalizeName(entry.auraName)
+                local tg = BuffMeDB.auraToTypeGroup[normalAura]
+                if tg then
+                    BuffMe_RegisterInEffectGroup(sig, tg, normalAura, entry.auraName, value)
+                    BuffMe_Debug("Effect group captured: \"" .. entry.auraName ..
+                        "\" value=" .. value .. " tg=" .. tg)
+                end
+            end
+            return
+        end
+        i = i + 1
+    end
+end
+
+-- Return the tooltip signature and primary numeric value for a unit buff at index i.
+-- Public so the optimizer can call it when scanning unknown buffs against effect groups.
+function BuffMe_GetUnitBuffInfo(targetUnit, index)
+    local tt = GetScanTT()
+    tt:ClearLines()
+    tt:SetUnitBuff(targetUnit, index)
+    local lines = ReadScanTTLines(tt)
+    return LinesToSig(lines), LinesToValue(lines)
+end
+
 -- Extract meaningful keywords (length > 3) from a spell/buff name
 local function GetNameKeywords(name)
     local keywords = {}
@@ -32,6 +138,8 @@ function BuffMe_ResetSpellDB()
     BuffMeDB.nameToKey           = {}
     BuffMeDB.auraToTypeGroup     = {}
     BuffMeDB.typeGroupMembers    = {}
+    BuffMeDB.auraDisplayNames    = {}
+    BuffMeDB.effectGroups        = {}
     BuffMeDB.spellToTargetGroup  = {}
     BuffMeDB.targetGroupMembers  = {}
     BuffMeDB.spellToPlayerGroup  = {}
@@ -66,6 +174,27 @@ function BuffMe_InitDB()
     BuffMeDB.nameToKey = BuffMeDB.nameToKey or {}
     -- per-typeGroup per-target last-cast preference: [typeGroup][targetName] = spellKey
     BuffMeDB.lastCastForGroup = BuffMeDB.lastCastForGroup or {}
+    -- [normalizedAuraName] = original display name; covers both castable spells and
+    -- external auras registered via tooltip matching (which aren't in the spell DB)
+    BuffMeDB.auraDisplayNames = BuffMeDB.auraDisplayNames or {}
+    -- [tooltipSig] = { typeGroup, members = { [normalName] = { name, value } } }
+    -- Keyed by normalized tooltip signature (digits→#); used by the optimizer to match
+    -- unknown buffs on targets to our known effect groups by comparing tooltip text.
+    BuffMeDB.effectGroups = BuffMeDB.effectGroups or {}
+    -- One-time migration: sigs are now sourced exclusively from live aura tooltips
+    -- (SetUnitBuff) rather than spellbook tooltips (SetSpell). Old spellbook-sourced
+    -- sigs have mana-cost and cast-time lines that aura tooltips don't, so they can
+    -- never match. Clear them so they are re-captured on next observed cast.
+    if not BuffMeDB.auraSigV2 then
+        BuffMeDB.effectGroups = {}
+        if BuffMeDB.spells then
+            for _, entry in pairs(BuffMeDB.spells) do
+                entry.tooltipSig   = nil
+                entry.tooltipValue = nil
+            end
+        end
+        BuffMeDB.auraSigV2 = true
+    end
 end
 
 -- Record which spell was last cast for a typeGroup on a named target.
@@ -93,6 +222,13 @@ function BuffMe_GetSpell(spellId)
     return BuffMeDB.spells[spellId]
 end
 
+-- Buff duration threshold below which a spell is treated as a combat active rather than
+-- a persistent party buff.  UnitBuff returns total duration (not time remaining); 0 means
+-- permanent.  Anything with a finite duration ≤ this value (in seconds) is auto-ineligible.
+-- Covers short-lived shields (Rock Barrier, 10 s), burst cooldowns (Therazane's Rage, 10 s),
+-- and charge-based abilities whose recharge period is short.
+local SHORT_BUFF_THRESHOLD = 120
+
 -- Register a buff spell we can cast (discovered via SPELL_AURA_APPLIED in combat log)
 function BuffMe_RegisterSpell(spellId, spellName, auraName)
     if BuffMeDB.spells[spellId] then return end  -- already known
@@ -104,7 +240,30 @@ function BuffMe_RegisterSpell(spellId, spellName, auraName)
         priority = 5,
     }
     BuffMeDB.spells[spellId] = entry
-    BuffMeDB.nameToKey[spellName] = spellId  -- reverse index; any valid key works for lookup
+    BuffMeDB.nameToKey[spellName] = spellId
+    BuffMeDB.auraDisplayNames[BuffMe_NormalizeName(auraName)] = auraName
+
+    -- Short-duration detection: scan the player's current UnitBuff list for this aura.
+    -- If the buff exists and has a finite duration ≤ SHORT_BUFF_THRESHOLD it is a combat
+    -- active, not a sustained party buff — mark it ineligible immediately.
+    -- UnitBuff fires before CLEU on Ascension, so the buff is already visible here.
+    -- duration == 0 means permanent; we never mark those.
+    do
+        local i = 1
+        while true do
+            local buffName, _, _, _, _, duration = UnitBuff("player", i)
+            if not buffName then break end
+            if buffName == auraName then
+                if duration and duration > 0 and duration <= SHORT_BUFF_THRESHOLD then
+                    entry.ineligible = true
+                    BuffMe_Debug("Auto-ineligible (short duration " ..
+                        math.floor(duration) .. "s): \"" .. spellName .. "\"")
+                end
+                break
+            end
+            i = i + 1
+        end
+    end
 
     -- Bootstrap typeGroup for this new aura. Before creating a fresh group, scan the
     -- existing DB for any aura that shares a meaningful keyword (>3 chars) with this one.
@@ -324,7 +483,59 @@ function BuffMe_FindBlockingBuff(targetUnit, ourSpellName)
         end
     end
 
+    -- Pass 3: tooltip signature matching — catches name-dissimilar same-effect spells
+    -- (e.g. "Grove Instinct" blocked by "Whispers of Y'shaarj": identical body text, higher numbers)
+    local ourEntry = nil
+    for _, entry in pairs(BuffMeDB.spells) do
+        if entry.name == ourSpellName then
+            ourEntry = entry
+            break
+        end
+    end
+    if ourEntry then
+        local ourSig = BuffMe_GetOurSpellInfo(ourEntry)
+        if ourSig and ourSig ~= "" then
+            i = 1
+            while true do
+                local buffName = UnitBuff(targetUnit, i)
+                if not buffName then break end
+                local buffSig = BuffMe_GetUnitBuffInfo(targetUnit, i)
+                if buffSig == ourSig then
+                    BuffMe_Debug("Tooltip match: \"" .. buffName .. "\" blocks \"" .. ourSpellName .. "\" (sig: " .. ourSig .. ")")
+                    return buffName
+                end
+                i = i + 1
+            end
+        end
+    end
+
     return nil
+end
+
+-- Register an aura (castable or external) into an effect group keyed by tooltip signature.
+-- typeGroup links the effect group back to the optimizer's typeGroup system.
+-- value is the primary numeric value extracted from the tooltip (for strength comparison).
+function BuffMe_RegisterInEffectGroup(sig, typeGroup, normalName, displayName, value)
+    if not sig or sig == "" or not typeGroup or not normalName then return end
+    local group = BuffMeDB.effectGroups[sig]
+    if not group then
+        group = { typeGroup = typeGroup, members = {} }
+        BuffMeDB.effectGroups[sig] = group
+    end
+    group.members[normalName] = { name = displayName, value = value or 0 }
+end
+
+function BuffMe_RegisterAuraInTypeGroup(auraName, typeGroup)
+    local n = BuffMe_NormalizeName(auraName)
+    if BuffMeDB.auraToTypeGroup[n] then return end
+    BuffMeDB.auraToTypeGroup[n] = typeGroup
+    BuffMeDB.auraDisplayNames[n] = auraName  -- preserve original name for UI display
+    local members = BuffMeDB.typeGroupMembers[typeGroup]
+    if members then
+        local found = false
+        for _, m in ipairs(members) do if m == n then found = true; break end end
+        if not found then table.insert(members, n) end
+    end
 end
 
 -- Return all spell entries that are currently castable: known, eligible, and off cooldown.
@@ -341,13 +552,31 @@ function BuffMe_GetKnownBuffSpells()
                 available = GetSpellInfo(entry.name) ~= nil
             end
             if available then
-                -- Skip spells currently on a real cooldown (longer than the GCD).
-                -- Using spell name instead of ID because Ascension's cast and aura
-                -- spell IDs often differ; name-based lookup always finds the cast spell.
-                local start, duration = GetSpellCooldown(entry.name)
-                local onCooldown = start and start > 0 and duration and duration > 1.5
-                if not onCooldown then
-                    table.insert(result, entry)
+                -- IsHarmfulSpell catches quest-item abilities (e.g. "Thrown Torch") that
+                -- target enemies and slipped into the DB before the CLEU friendly-dest guard
+                -- was added. Mark ineligible on first encounter so future sessions skip them.
+                if IsHarmfulSpell(entry.name) then
+                    entry.ineligible = true
+                    BuffMe_Debug("Marked ineligible (harmful spell): \"" .. entry.name .. "\"")
+                else
+                    -- Skip spells currently on a real cooldown (longer than the GCD).
+                    -- Using spell name instead of ID because Ascension's cast and aura
+                    -- spell IDs often differ; name-based lookup always finds the cast spell.
+                    local start, duration = GetSpellCooldown(entry.name)
+                    local onCooldown = start and start > 0 and duration and duration > 1.5
+                    if not onCooldown then
+                        table.insert(result, entry)
+                    end
+                    -- Re-register in effectGroups on each scan (idempotent) so that if
+                    -- the sig was captured after the last registration it gets indexed.
+                    local sig, value = BuffMe_GetOurSpellInfo(entry)
+                    if sig and sig ~= "" then
+                        local normalAura = BuffMe_NormalizeName(entry.auraName)
+                        local tg = BuffMeDB.auraToTypeGroup[normalAura]
+                        if tg then
+                            BuffMe_RegisterInEffectGroup(sig, tg, normalAura, entry.auraName, value)
+                        end
+                    end
                 end
             end
         end

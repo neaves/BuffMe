@@ -16,6 +16,17 @@ end
 local inCombat        = false
 local lastCastAttempt = nil  -- { spellId, unit, spellName } — for error-based learning
 local rescanPending   = false
+
+-- Resolve a unit GUID to a unit token by checking player + current party + target.
+local function GUIDToUnit(guid)
+    if not guid then return nil end
+    if UnitGUID("player") == guid then return "player" end
+    for i = 1, GetNumPartyMembers() do
+        local u = "party" .. i
+        if UnitGUID(u) == guid then return u end
+    end
+    if UnitExists("target") and UnitGUID("target") == guid then return "target" end
+end
 local pendingCast     = nil  -- { name, spellId } — for CLEU-less spells learned via UNIT_AURA
 local playerBuffCache = {}   -- [buffName] = true; tracks current player buffs for diff
 local pendingRemovals    = {}   -- [destGUID] = auraName; CLEU REMOVED waiting for paired APPLIED
@@ -174,13 +185,49 @@ local function HandleBouncedCast(source)
     if targetUnit and ourSpellName and UnitExists(targetUnit) then
         local blockingBuff = BuffMe_FindBlockingBuff(targetUnit, ourSpellName)
         if blockingBuff then
-            BuffMe_Debug("Blocking aura found: \"" .. blockingBuff .. "\" → merging typeGroups")
-            BuffMe_MergeTypeGroups(ourSpellName, blockingBuff)
-            for sid, entry in pairs(BuffMeDB.spells) do
-                if entry.auraName == blockingBuff then
-                    BuffMe_Debug("Linking targetGroup: " .. tostring(ourKey) .. " + " .. tostring(sid))
-                    BuffMe_LinkTargetGroup(ourKey, sid)
-                    break
+            BuffMe_Debug("Blocking aura found: \"" .. blockingBuff .. "\"")
+            local blockerNorm = BuffMe_NormalizeName(blockingBuff)
+            local ourNorm     = BuffMe_NormalizeName(ourSpellName)
+            local blockerTG   = BuffMeDB.auraToTypeGroup[blockerNorm]
+            local ourTG       = BuffMeDB.auraToTypeGroup[ourNorm]
+            if not blockerTG and ourTG then
+                -- Blocker is not in our DB (external/unknown buff) — register it directly
+                BuffMe_RegisterAuraInTypeGroup(blockingBuff, ourTG)
+                BuffMe_Debug("Registered external blocker \"" .. blockingBuff .. "\" in typeGroup \"" .. ourTG .. "\"")
+            else
+                -- Both sides known — merge (or same TG already, merge is a no-op)
+                BuffMe_MergeTypeGroups(ourSpellName, blockingBuff)
+                for sid, entry in pairs(BuffMeDB.spells) do
+                    if entry.auraName == blockingBuff then
+                        BuffMe_Debug("Linking targetGroup: " .. tostring(ourKey) .. " + " .. tostring(sid))
+                        BuffMe_LinkTargetGroup(ourKey, sid)
+                        break
+                    end
+                end
+            end
+            -- Populate effect groups for both our spell and the blocker so the Effect Groups
+            -- panel can display them and the optimizer can match them in future passes.
+            local ourEntry = ourKey and BuffMeDB.spells[ourKey]
+            local ourSig, ourValue = ourEntry and BuffMe_GetOurSpellInfo(ourEntry)
+            if ourSig and ourSig ~= "" and (ourTG or BuffMeDB.auraToTypeGroup[ourNorm]) then
+                local resolvedTG = ourTG or BuffMeDB.auraToTypeGroup[ourNorm]
+                BuffMe_RegisterInEffectGroup(ourSig, resolvedTG, ourNorm, ourSpellName, ourValue)
+                -- Scan the blocker's tooltip; if it matches our sig, register it too
+                if UnitExists(targetUnit) then
+                    local bi = 1
+                    while true do
+                        local bn = UnitBuff(targetUnit, bi)
+                        if not bn then break end
+                        if bn == blockingBuff then
+                            local bSig, bValue = BuffMe_GetUnitBuffInfo(targetUnit, bi)
+                            if bSig == ourSig then
+                                BuffMe_RegisterInEffectGroup(ourSig, resolvedTG, blockerNorm, blockingBuff, bValue)
+                                BuffMe_Debug("Effect group entry: \"" .. blockingBuff .. "\" value=" .. (bValue or 0))
+                            end
+                            break
+                        end
+                        bi = bi + 1
+                    end
                 end
             end
         else
@@ -265,6 +312,9 @@ frame:SetScript("OnEvent", function(self, event, ...)
                     end
                     if sid then
                         BuffMe_RegisterSpell(sid, pending.name, auraName)
+                        -- Capture aura tooltip for effect-group matching (always self-applied).
+                        local entry = BuffMeDB.spells[sid]
+                        if entry then BuffMe_CaptureAuraTooltip("player", entry) end
                         -- Record last-cast preference (UNIT_AURA fallback is always player→player).
                         local normalAura = BuffMe_NormalizeName(auraName)
                         local tg = BuffMeDB.auraToTypeGroup[normalAura]
@@ -436,7 +486,35 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         BuffMe_Debug("Skipped registration (proc/item): \"" .. spellName ..
                             "\" (ID " .. spellId .. ") — no matching UNIT_SPELLCAST_SENT")
                     else
+                        -- Only register/track spells that land on friendly targets.
+                        -- Quest-item abilities (e.g. "Thrown Torch") fire UNIT_SPELLCAST_SENT
+                        -- but apply to enemy targets; COMBATLOG_OBJECT_REACTION_FRIENDLY (0x10)
+                        -- in destFlags identifies friendly targets reliably.
+                        local isFriendlyDest = (destGUID == playerGUID)
+                            or (bit.band(destFlags or 0, 0x00000010) ~= 0)
+                        if not isFriendlyDest then
+                            BuffMe_Debug("Skipped registration (enemy target): \"" .. spellName ..
+                                "\" (ID " .. spellId .. ") → " .. (destName or "?"))
+                            -- Retroactively mark existing entries ineligible when we observe
+                            -- them being used on an enemy — handles spells registered in a
+                            -- prior session before this guard existed.
+                            if not isNew then
+                                local existingEntry = BuffMeDB.spells[spellId]
+                                if existingEntry and not existingEntry.ineligible then
+                                    existingEntry.ineligible = true
+                                    BuffMe_Debug("Marked ineligible (enemy-only): \"" .. spellName .. "\"")
+                                end
+                            end
+                        else
                         BuffMe_RegisterSpell(spellId, spellName, spellName)
+                        -- Capture the aura's tooltip sig for effect-group matching.
+                        -- We use the live unit-buff tooltip (SetUnitBuff) as the sole
+                        -- source so sigs are format-identical on both sides of comparisons.
+                        local destUnit = GUIDToUnit(destGUID)
+                        if destUnit then
+                            local entry = BuffMeDB.spells[spellId]
+                            if entry then BuffMe_CaptureAuraTooltip(destUnit, entry) end
+                        end
                         -- Record last-cast preference for this typeGroup/target pair.
                         -- This is the authoritative confirmation the buff actually landed.
                         if destName then
@@ -476,6 +554,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         lastCastAttempt = nil
                         pendingCast = nil  -- CLEU handled it; cancel the UNIT_AURA fallback
                         ScheduleRescan()
+                        end  -- isFriendlyDest
                     end
                 end
             elseif destGUID == playerGUID then
@@ -487,6 +566,32 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 if spellName then
                     BuffMe_Debug("Aura lost: \"" .. spellName .. "\" (ID " .. (spellId or "?") ..
                         ") left " .. (destName or "?"))
+
+                    -- Self-only detection via toggle/redirect: we tried to cast on a party
+                    -- member but the player's own buff dropped instead of landing on them.
+                    -- Two patterns both produce this:
+                    --   (a) True toggle: the spell is self-only and re-casting removes it
+                    --       from the caster (Bear/Hawk/Wolf/Turtle). No APPLIED follows.
+                    --   (b) Group-spread self-cast: the spell always fires on self and then
+                    --       spreads (Lion 505217). The old application drops before the new
+                    --       one lands, so REMOVED fires on the player first.
+                    -- In both cases, targeting a party member never helps — the spell only
+                    -- responds to "player" as the unit. Mark it self-only so the optimizer
+                    -- stops targeting party members for this typeGroup slot.
+                    if destGUID == playerGUID
+                    and lastCastAttempt
+                    and lastCastAttempt.unit ~= "player"
+                    and lastCastAttempt.spellName == spellName then
+                        local selfKey = lastCastAttempt.spellId
+                            or (BuffMeDB.nameToKey and BuffMeDB.nameToKey[spellName])
+                        if selfKey and BuffMe_MarkSelfOnly(selfKey) then
+                            BuffMe_Debug("Self-only detected (toggle/redirect): \"" ..
+                                spellName .. "\" — player buff dropped when targeting " ..
+                                lastCastAttempt.unit)
+                        end
+                        lastCastAttempt = nil  -- consumed; prevents PrepareCast overwrite
+                    end
+
                     pendingRemovals[destGUID] = spellName  -- paired APPLIED may follow this frame
                     ScheduleRescan()
                 end

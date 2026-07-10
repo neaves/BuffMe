@@ -596,28 +596,49 @@ function BuffMe_ScanPartyForEffectGroups(specificUnit)
     end
 end
 
--- Set of spell names currently in the player's spellbook, rebuilt on SPELLS_CHANGED.
--- GetSpellInfo returns data for ANY spell in the game database (known or not), so it
--- cannot distinguish "I know this spell right now" from "this spell exists in the world".
--- GetSpellBookItemInfo only lists spells in the current spellbook, so it correctly
--- reflects spec changes: spells lost on a spec swap disappear from this set immediately.
+-- Live snapshots of the current spellbook, rebuilt on SPELLS_CHANGED / spec swap.
+-- GetSpellInfo returns data for ANY spell in the game's database (known or not), so
+-- it cannot distinguish "I know this now" from "this spell exists somewhere".
+-- GetSpellBookItemInfo only lists spells in the current spellbook.
+--   knownSpellIds  — primary lookup: numeric spellId from GetSpellBookItemInfo (locale-safe)
+--   knownSpellNames — fallback for synthetic-key entries ("__SpellName") where the client
+--                     never returned a numeric ID, so name is the only identifier we have.
+--                     Also covers Ascension custom IDs (500000+) that GetSpellBookItemInfo
+--                     may not surface even when the player knows the spell.
+local knownSpellIds   = {}
 local knownSpellNames = {}
 
-function BuffMe_RebuildKnownSpellNames()
-    wipe(knownSpellNames)
+-- Scan the current spellbook and commit the result into knownSpellIds/knownSpellNames.
+-- Returns true on a successful (non-empty) scan, false when the spellbook is mid-transition.
+-- IMPORTANT: does NOT wipe the existing snapshot on an empty scan. Ascension fires
+-- SPELLS_CHANGED repeatedly during a spec swap while GetNumSpellTabs() == 0 (old spells
+-- stripped before new ones are added). Keeping the previous snapshot during that window
+-- prevents the GetSpellInfo fallback from re-approving lost-spec spells.
+function BuffMe_RebuildKnownSpells()
+    local newIds   = {}
+    local newNames = {}
+    local count    = 0
     for tab = 1, GetNumSpellTabs() do
         local _, _, offset, numSpells = GetSpellTabInfo(tab)
         for slot = offset + 1, offset + numSpells do
             local spellType, spellId = GetSpellBookItemInfo(slot, BOOKTYPE_SPELL)
             if spellType == "SPELL" and spellId then
+                newIds[spellId]   = true
+                count = count + 1
                 local name = GetSpellInfo(spellId)
-                if name then knownSpellNames[name] = true end
+                if name then newNames[name] = true end
             end
         end
     end
-    BuffMe_Debug("Spellbook rebuilt: " .. (function()
-        local n = 0; for _ in pairs(knownSpellNames) do n = n + 1 end; return n
-    end)() .. " spells known")
+    if count == 0 then
+        BuffMe_Debug("Spellbook rebuild: 0 spells visible (transition in progress, retrying)")
+        return false
+    end
+    -- Commit atomically only when we have actual data
+    wipe(knownSpellIds);   for k in pairs(newIds)   do knownSpellIds[k]   = true end
+    wipe(knownSpellNames); for k in pairs(newNames) do knownSpellNames[k] = true end
+    BuffMe_Debug("Spellbook rebuilt: " .. count .. " spells")
+    return true
 end
 
 -- Return all spell entries that are currently castable: known, eligible, and off cooldown.
@@ -627,12 +648,18 @@ function BuffMe_GetKnownBuffSpells()
     local result = {}
     for key, entry in pairs(BuffMeCharDB.spells) do
         if not entry.ineligible then
-            -- Gate on the spellbook snapshot rather than GetSpellInfo.
-            -- If the snapshot is empty (hasn't been populated yet — first frame before
-            -- PLAYER_ENTERING_WORLD fires), fall back to GetSpellInfo so nothing breaks.
+            -- Gate on the live spellbook snapshot rather than GetSpellInfo.
+            -- ID lookup is preferred (locale-safe); name is a fallback for synthetic
+            -- string keys and for Ascension custom IDs the client scan may miss.
+            -- If neither snapshot has been populated yet (pre-PLAYER_ENTERING_WORLD),
+            -- fall back to GetSpellInfo so nothing breaks on the very first frame.
             local available
-            if next(knownSpellNames) then
-                available = knownSpellNames[entry.name]
+            if next(knownSpellIds) then
+                if type(key) == "number" then
+                    available = knownSpellIds[key] or knownSpellNames[entry.name]
+                else
+                    available = knownSpellNames[entry.name]
+                end
             elseif type(key) == "number" then
                 available = GetSpellInfo(key) ~= nil
             else

@@ -16,6 +16,8 @@ end
 local inCombat        = false
 local lastCastAttempt = nil  -- { spellId, unit, spellName } — for error-based learning
 local rescanPending   = false
+local rebuildPending  = false  -- true when SPELLS_CHANGED fired with 0 tabs; retry via OnUpdate
+local rebuildTimer    = 0
 
 -- Resolve a unit GUID to a unit token by checking player + current party + target.
 local function GUIDToUnit(guid)
@@ -116,6 +118,17 @@ end
 frame:SetScript("OnUpdate", function(self, elapsed)
     if next(pendingRemovals) then wipe(pendingRemovals) end  -- clear unmatched CLEU removals
     recentlyCastName = nil  -- proc guard: reset each frame after CLEU has had a chance to fire
+    if rebuildPending then
+        rebuildTimer = rebuildTimer - elapsed
+        if rebuildTimer <= 0 then
+            if BuffMe_RebuildKnownSpells() then
+                rebuildPending = false
+                ScheduleRescan()
+            else
+                rebuildTimer = 0.25  -- spellbook still empty; retry in 250 ms
+            end
+        end
+    end
     if rescanPending then
         rescanPending = false
         RefreshUI()
@@ -124,6 +137,15 @@ end)
 
 local function ScheduleRescan()
     rescanPending = true
+end
+
+-- Try to rebuild the spellbook snapshot immediately; if the spellbook is still
+-- mid-transition (0 tabs), arm the OnUpdate retry loop instead.
+local function ScheduleSpellbookRebuild()
+    if not BuffMe_RebuildKnownSpells() then
+        rebuildPending = true
+        rebuildTimer   = 0.1  -- give the client a moment before first retry
+    end
 end
 
 function BuffMe_ForceRefresh()
@@ -263,7 +285,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         SnapshotPlayerBuffs()
-        BuffMe_RebuildKnownSpellNames()
+        BuffMe_RebuildKnownSpells()
         BuffMe_ScanPartyForEffectGroups(nil)
         ScheduleRescan()
 
@@ -359,14 +381,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
         ScheduleRescan()
 
     elseif event == "SPELLS_CHANGED" then
-        -- Fires on spec changes, talent resets, and new spell acquisitions.
-        -- Rebuild the known-spell snapshot immediately so GetKnownBuffSpells stops
-        -- offering spells that were just removed from the current build.
-        BuffMe_RebuildKnownSpellNames()
+        -- Fires repeatedly during spec transitions while the spellbook is empty.
+        -- ScheduleSpellbookRebuild tries immediately and retries via OnUpdate until
+        -- the new spec's spells are visible (non-zero tab count).
+        ScheduleSpellbookRebuild()
         ScheduleRescan()
 
     elseif event == "PLAYER_TALENT_UPDATE" then
-        BuffMe_RebuildKnownSpellNames()
+        ScheduleSpellbookRebuild()
         ScheduleRescan()
 
     elseif event == "PLAYER_TARGET_CHANGED" then

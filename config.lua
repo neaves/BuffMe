@@ -143,6 +143,52 @@ createMacroBtn:SetScript("OnClick", function()
     end
 end)
 
+-- Register with Clique (side-by-side with Create Macro)
+local cliqueBtn = CreateFrame("Button", "BuffMeCliqueRegisterButton", optContent, "UIPanelButtonTemplate")
+cliqueBtn:SetSize(140, 24)
+cliqueBtn:SetPoint("LEFT", createMacroBtn, "RIGHT", 8, 0)
+cliqueBtn:SetText("Register w/ Clique")
+ButtonTip(cliqueBtn,
+    "Add a Clique binding: Alt+click any unit frame to cast the best\n" ..
+    "available buff on that unit.\n" ..
+    "Requires the Clique addon to be loaded. You can change or\n" ..
+    "remove the binding in Clique's settings (/clique).")
+cliqueBtn:SetScript("OnClick", function()
+    if not Clique then
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cffff4444[Buff Me]|r Clique is not loaded. Install and enable the Clique addon first.")
+        return
+    end
+    -- Check for an existing BuffMeHoverButton binding to avoid duplicates
+    if Clique.bindings then
+        for _, binding in ipairs(Clique.bindings) do
+            if binding.type == "macro" and binding.macrotext
+               and binding.macrotext:find("BuffMeHoverButton", 1, true) then
+                DEFAULT_CHAT_FRAME:AddMessage(
+                    "|cff00ccff[Buff Me]|r Clique binding already registered.\n" ..
+                    "Edit or remove it in Clique's settings (/clique).")
+                return
+            end
+        end
+    end
+    local ok = Clique:AddBinding({
+        key       = "ALT-BUTTON1",
+        type      = "macro",
+        macrotext = "/click BuffMeHoverButton",
+        sets      = { default = true },
+    })
+    if ok then
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[Buff Me]|r Clique binding registered!\n" ..
+            "Alt+click any unit frame to cast the best available buff on that unit.\n" ..
+            "Change the key in Clique settings (/clique).")
+    else
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cffff4444[Buff Me]|r Could not register Clique binding. " ..
+            "Try again out of combat.")
+    end
+end)
+
 -- Scale
 local scaleLabel = optContent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
 scaleLabel:SetPoint("TOPLEFT", createMacroBtn, "BOTTOMLEFT", 0, -14)

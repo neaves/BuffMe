@@ -509,3 +509,45 @@ function BuffMe_ApplyIdleState()
         end
     end
 end
+
+-- ── Clique hover-cast button ──────────────────────────────────────────────────
+-- Invisible secure button. Clique users bind "/click BuffMeHoverButton" to a
+-- key or mouse button via the "Register with Clique" button in config; pressing
+-- that binding while hovering any Clique-registered unit frame casts the best
+-- available buff on that unit. The frame is never shown — /click in macros works
+-- on hidden frames by frame name.
+
+local hoverButton = CreateFrame("Button", "BuffMeHoverButton", UIParent,
+    "SecureActionButtonTemplate")
+hoverButton:SetSize(1, 1)
+hoverButton:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+hoverButton:RegisterForClicks("AnyUp")
+
+hoverButton:SetScript("PreClick", function(self, mouseButton, down)
+    if InCombatLockdown() then
+        self:SetAttribute("type", "")
+        return
+    end
+    if not UnitExists("mouseover") or not UnitIsFriend("player", "mouseover") then
+        self:SetAttribute("type", "")
+        return
+    end
+    local spellId, spellEntry = BuffMe_GetBestCastForUnit("mouseover")
+    if not spellId or not spellEntry then
+        self:SetAttribute("type", "")
+        return
+    end
+    local spellName
+    if type(spellId) == "number" then
+        spellName = GetSpellInfo(spellId)
+    else
+        spellName = spellEntry.name
+    end
+    if not spellName then
+        self:SetAttribute("type", "")
+        return
+    end
+    self:SetAttribute("type",  "spell")
+    self:SetAttribute("spell", spellName)
+    self:SetAttribute("unit",  "mouseover")
+end)

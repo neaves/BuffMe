@@ -274,6 +274,94 @@ function BuffMe_GetNextCast()
     return bestSpellId, bestUnit
 end
 
+-- Return (spellId, spellEntry) for the best buff to cast on a single unit.
+-- Used by BuffMeHoverButton (Clique integration) so it can target "mouseover"
+-- independently of the full party-queue logic in BuffMe_GetNextCast.
+function BuffMe_GetBestCastForUnit(unit)
+    if not BuffMeCharDB then return nil, nil end
+    if not UnitExists(unit) or UnitIsDeadOrGhost(unit) then return nil, nil end
+
+    local effectSigByNorm = {}
+    for sig, egEntry in pairs(BuffMeCharDB.effectGroups) do
+        for normalName in pairs(egEntry.members) do
+            effectSigByNorm[normalName] = sig
+        end
+    end
+
+    -- Scan the target unit's auras into coverage buckets
+    local coveredTG       = {}
+    local coveredSigs     = {}
+    local unitPlayerAuras = {}   -- normalName set for player-cast buffs (targetGroup check)
+    local i = 1
+    while true do
+        local buffName, _, _, _, _, _, _, casterUnit = UnitBuff(unit, i)
+        if not buffName then break end
+        local normalName = BuffMe_NormalizeName(buffName)
+        local typeGroup  = BuffMeCharDB.auraToTypeGroup[normalName] or normalName
+        local effectSig  = (casterUnit ~= "player") and effectSigByNorm[normalName] or nil
+        if effectSig then
+            coveredSigs[effectSig] = true
+        else
+            coveredTG[typeGroup] = true
+        end
+        if casterUnit == "player" then
+            unitPlayerAuras[normalName] = true
+        end
+        i = i + 1
+    end
+
+    -- Scan player's own buffs to find which playerGroups are already active
+    local playerAuras = {}
+    i = 1
+    while true do
+        local buffName, _, _, _, _, _, _, casterUnit = UnitBuff("player", i)
+        if not buffName then break end
+        playerAuras[BuffMe_NormalizeName(buffName)] = { caster = casterUnit }
+        i = i + 1
+    end
+    local activePlayerGroups = GetActivePlayerGroups(playerAuras)
+
+    local providers, knownSpells = BuffMe_GetProviderTypeGroups()
+    local bestSpellId, bestEntry, bestPriority = nil, nil, -1
+
+    for typeGroup in pairs(providers) do
+        if not coveredTG[typeGroup] then
+            local selectedEntry = SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
+            if selectedEntry then
+                local pg = BuffMeCharDB.spellToPlayerGroup[selectedEntry.spellId]
+                if not (pg and activePlayerGroups[pg]) then
+                    local shouldSkip = false
+                    local tg = BuffMeCharDB.spellToTargetGroup[selectedEntry.spellId]
+                    if tg then
+                        for _, tgSpellId in ipairs(BuffMeCharDB.targetGroupMembers[tg] or {}) do
+                            local tgEntry = BuffMeCharDB.spells[tgSpellId]
+                            if tgEntry then
+                                local normalTGAura = BuffMe_NormalizeName(tgEntry.auraName)
+                                if unitPlayerAuras[normalTGAura] then
+                                    if (tgEntry.priority or 5) >= (selectedEntry.priority or 5) then
+                                        shouldSkip = true
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    if not shouldSkip then
+                        local priority = selectedEntry.priority or 5
+                        if priority > bestPriority then
+                            bestPriority = priority
+                            bestSpellId  = selectedEntry.spellId
+                            bestEntry    = selectedEntry
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return bestSpellId, bestEntry
+end
+
 -- Count total missing buff slots across all party members (for the button badge)
 function BuffMe_CountMissingBuffs()
     local count    = 0

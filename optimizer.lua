@@ -5,6 +5,33 @@ local function IsUnitInRange(unit)
     return unit == "player" or UnitInRange(unit)
 end
 
+-- Build the live candidate unit list: party members + current friendly non-party target.
+-- "target" is appended only when outside combat, the target is a player, is friendly,
+-- and is not already one of the party tokens (avoids double-counting a party member
+-- who is also the current target).
+local function GetCandidateUnits()
+    local units = {}
+    for _, u in ipairs(PARTY_UNITS) do
+        units[#units + 1] = u
+    end
+    if not InCombatLockdown()
+       and UnitExists("target")
+       and UnitIsPlayer("target")
+       and UnitIsFriend("player", "target") then
+        local alreadyIn = false
+        for _, u in ipairs(PARTY_UNITS) do
+            if UnitExists(u) and UnitIsUnit("target", u) then
+                alreadyIn = true
+                break
+            end
+        end
+        if not alreadyIn then
+            units[#units + 1] = "target"
+        end
+    end
+    return units
+end
+
 -- Scan all live party members' buffs.
 -- Returns: { [unit] = { [normalizedAuraName] = { auraName, caster, typeGroup, effectSig } } }
 -- effectSig is set only for external buffs (caster ~= "player") matched via effectGroups.
@@ -22,8 +49,9 @@ local function ScanPartyAuras()
         end
     end
 
+    local candidates = GetCandidateUnits()
     local auraMap = {}
-    for _, unit in ipairs(PARTY_UNITS) do
+    for _, unit in ipairs(candidates) do
         if UnitExists(unit) then
             auraMap[unit] = {}
             local i = 1
@@ -81,7 +109,7 @@ local function ScanPartyAuras()
             end
         end
     end
-    return auraMap
+    return auraMap, candidates
 end
 
 -- Build a table of typeGroup -> best spell entry that the player can currently cast.
@@ -160,14 +188,14 @@ end
 
 -- Main: return (spellId, targetUnit) for the highest-priority missing buff, or nil, nil
 function BuffMe_GetNextCast()
-    local auraMap            = ScanPartyAuras()
+    local auraMap, candidates = ScanPartyAuras()
     local providers, knownSpells = BuffMe_GetProviderTypeGroups()
     local playerAuras        = auraMap["player"] or {}
     local activePlayerGroups = GetActivePlayerGroups(playerAuras)
 
     local bestSpellId, bestUnit, bestPriority = nil, nil, -1
 
-    for _, unit in ipairs(PARTY_UNITS) do
+    for _, unit in ipairs(candidates) do
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and IsUnitInRange(unit) then
             local unitAuras = auraMap[unit] or {}
 
@@ -249,10 +277,10 @@ end
 -- Count total missing buff slots across all party members (for the button badge)
 function BuffMe_CountMissingBuffs()
     local count    = 0
-    local auraMap  = ScanPartyAuras()
+    local auraMap, candidates = ScanPartyAuras()
     local providers, knownSpells = BuffMe_GetProviderTypeGroups()
 
-    for _, unit in ipairs(PARTY_UNITS) do
+    for _, unit in ipairs(candidates) do
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and IsUnitInRange(unit) then
             local unitAuras = auraMap[unit] or {}
             local coveredTG   = {}

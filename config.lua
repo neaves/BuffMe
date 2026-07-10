@@ -111,9 +111,41 @@ resetBtn:SetScript("OnClick", function()
 end)
 ButtonTip(resetBtn, "Return the button to its default position on screen.")
 
+-- Create Macro
+local createMacroBtn = CreateFrame("Button", "BuffMeCreateMacroButton", optContent, "UIPanelButtonTemplate")
+createMacroBtn:SetSize(140, 24)
+createMacroBtn:SetPoint("TOPLEFT", anchorBtn, "BOTTOMLEFT", 0, -8)
+createMacroBtn:SetText("Create Macro")
+ButtonTip(createMacroBtn,
+    "Create a general macro called \"Buff Me\" in your macro book.\n" ..
+    "Drag it to your action bar to cast buffs from there.\n" ..
+    "Clicking it is identical to clicking the Buff Me! button.")
+createMacroBtn:SetScript("OnClick", function()
+    local MACRO_NAME = "Buff Me"
+    local MACRO_ICON = 1  -- numeric icon index required by this client build
+    local MACRO_BODY = "/click BuffMeButton"
+
+    local idx = GetMacroIndexByName(MACRO_NAME)
+    if idx and idx > 0 then
+        EditMacro(idx, MACRO_NAME, MACRO_ICON, MACRO_BODY, nil)
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Macro updated.")
+    else
+        local numGeneral = GetNumMacros()
+        if numGeneral >= 18 then
+            DEFAULT_CHAT_FRAME:AddMessage(
+                "|cffff4444[Buff Me]|r Cannot create macro: general macro slots are full (18/18).")
+            return
+        end
+        CreateMacro(MACRO_NAME, MACRO_ICON, MACRO_BODY, nil)
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[Buff Me]|r Macro created! Open your macro book (Shift-click a bag slot or type /macro) " ..
+            "and drag \"Buff Me\" to your action bar.")
+    end
+end)
+
 -- Scale
 local scaleLabel = optContent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-scaleLabel:SetPoint("TOPLEFT", anchorBtn, "BOTTOMLEFT", 0, -20)
+scaleLabel:SetPoint("TOPLEFT", createMacroBtn, "BOTTOMLEFT", 0, -14)
 scaleLabel:SetText("Button Scale")
 
 local scaleSlider = CreateFrame("Slider", "BuffMeScaleSlider", optContent, "OptionsSliderTemplate")

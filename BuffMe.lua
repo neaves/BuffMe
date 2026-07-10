@@ -102,6 +102,7 @@ frame:RegisterEvent("UI_ERROR_MESSAGE")
 frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 frame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 frame:RegisterEvent("UNIT_SPELLCAST_SENT")
+frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 
 local function RefreshUI()
     if BuffMe_UpdateContainerLayout then BuffMe_UpdateContainerLayout() end
@@ -356,6 +357,9 @@ frame:SetScript("OnEvent", function(self, event, ...)
         ScheduleRescan()
 
     elseif event == "SPELLS_CHANGED" then
+        ScheduleRescan()
+
+    elseif event == "PLAYER_TARGET_CHANGED" then
         ScheduleRescan()
 
     elseif event == "PLAYER_REGEN_DISABLED" then

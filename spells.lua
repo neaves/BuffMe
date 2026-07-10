@@ -596,6 +596,30 @@ function BuffMe_ScanPartyForEffectGroups(specificUnit)
     end
 end
 
+-- Set of spell names currently in the player's spellbook, rebuilt on SPELLS_CHANGED.
+-- GetSpellInfo returns data for ANY spell in the game database (known or not), so it
+-- cannot distinguish "I know this spell right now" from "this spell exists in the world".
+-- GetSpellBookItemInfo only lists spells in the current spellbook, so it correctly
+-- reflects spec changes: spells lost on a spec swap disappear from this set immediately.
+local knownSpellNames = {}
+
+function BuffMe_RebuildKnownSpellNames()
+    wipe(knownSpellNames)
+    for tab = 1, GetNumSpellTabs() do
+        local _, _, offset, numSpells = GetSpellTabInfo(tab)
+        for slot = offset + 1, offset + numSpells do
+            local spellType, spellId = GetSpellBookItemInfo(slot, BOOKTYPE_SPELL)
+            if spellType == "SPELL" and spellId then
+                local name = GetSpellInfo(spellId)
+                if name then knownSpellNames[name] = true end
+            end
+        end
+    end
+    BuffMe_Debug("Spellbook rebuilt: " .. (function()
+        local n = 0; for _ in pairs(knownSpellNames) do n = n + 1 end; return n
+    end)() .. " spells known")
+end
+
 -- Return all spell entries that are currently castable: known, eligible, and off cooldown.
 -- Cooldown is checked by spell NAME (not numeric ID) because on Ascension the cast spell
 -- ID and the buff aura ID often differ — name-based lookup reliably finds the cast spell.
@@ -603,8 +627,13 @@ function BuffMe_GetKnownBuffSpells()
     local result = {}
     for key, entry in pairs(BuffMeCharDB.spells) do
         if not entry.ineligible then
+            -- Gate on the spellbook snapshot rather than GetSpellInfo.
+            -- If the snapshot is empty (hasn't been populated yet — first frame before
+            -- PLAYER_ENTERING_WORLD fires), fall back to GetSpellInfo so nothing breaks.
             local available
-            if type(key) == "number" then
+            if next(knownSpellNames) then
+                available = knownSpellNames[entry.name]
+            elseif type(key) == "number" then
                 available = GetSpellInfo(key) ~= nil
             else
                 available = GetSpellInfo(entry.name) ~= nil

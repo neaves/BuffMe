@@ -103,6 +103,7 @@ frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 frame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 frame:RegisterEvent("UNIT_SPELLCAST_SENT")
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+frame:RegisterEvent("PLAYER_TALENT_UPDATE")
 
 local function RefreshUI()
     if BuffMe_UpdateContainerLayout then BuffMe_UpdateContainerLayout() end
@@ -262,6 +263,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         SnapshotPlayerBuffs()
+        BuffMe_RebuildKnownSpellNames()
         BuffMe_ScanPartyForEffectGroups(nil)
         ScheduleRescan()
 
@@ -357,6 +359,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
         ScheduleRescan()
 
     elseif event == "SPELLS_CHANGED" then
+        -- Fires on spec changes, talent resets, and new spell acquisitions.
+        -- Rebuild the known-spell snapshot immediately so GetKnownBuffSpells stops
+        -- offering spells that were just removed from the current build.
+        BuffMe_RebuildKnownSpellNames()
+        ScheduleRescan()
+
+    elseif event == "PLAYER_TALENT_UPDATE" then
+        BuffMe_RebuildKnownSpellNames()
         ScheduleRescan()
 
     elseif event == "PLAYER_TARGET_CHANGED" then

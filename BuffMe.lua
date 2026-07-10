@@ -148,6 +148,13 @@ local HARM_TARGET_PATTERNS = {
     "requires an enemy",
 }
 
+-- Detect "invalid target" rejections. Clear the in-flight cast attempt to stop the
+-- retry cascade; do not permanently modify the spell DB (the error is too ambiguous).
+local INVALID_TARGET_PATTERNS = {
+    "invalid target",
+    "you have selected an invalid target",
+}
+
 -- CLEU event types included in the diagnostic verbose dump.
 -- SPELL_CAST_START and SPELL_CAST_FAILED are intentionally omitted: they fire for
 -- every cast including combat spells and generate the bulk of diagnostic noise.
@@ -173,6 +180,15 @@ local function IsHarmTargetError(msg)
     if type(msg) ~= "string" then return false end
     local lower = msg:lower()
     for _, pat in ipairs(HARM_TARGET_PATTERNS) do
+        if lower:find(pat, 1, true) then return true end
+    end
+    return false
+end
+
+local function IsInvalidTargetError(msg)
+    if type(msg) ~= "string" then return false end
+    local lower = msg:lower()
+    for _, pat in ipairs(INVALID_TARGET_PATTERNS) do
         if lower:find(pat, 1, true) then return true end
     end
     return false
@@ -348,6 +364,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                             BuffMe_Debug("Registered via UNIT_AURA fallback: \"" .. pending.name ..
                                 "\" (" .. idStr .. ")")
                         end
+                        lastCastAttempt = nil
                     end
                 elseif #gained > 1 then
                     BuffMe_Debug("Ambiguous registration after \"" .. pending.name .. "\": " ..
@@ -427,6 +444,11 @@ frame:SetScript("OnEvent", function(self, event, ...)
             if BuffMe_MarkIneligible(lastCastAttempt.spellId, "requires hostile target") then
                 ScheduleRescan()
             end
+            lastCastAttempt = nil
+        elseif lastCastAttempt and IsInvalidTargetError(msg) then
+            -- "Invalid target" can mean many conditions (zone restriction, target state,
+            -- faction, etc.) — safe to clear the attempt to stop the retry cascade, but
+            -- don't permanently modify the spell DB based on this ambiguous error.
             lastCastAttempt = nil
         elseif lastCastAttempt and IsBouncedError(msg) then
             HandleBouncedCast("UI_ERROR")

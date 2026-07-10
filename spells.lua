@@ -162,8 +162,19 @@ function BuffMe_InitDB()
     if BuffMeDB.greyWhenIdle        == nil then BuffMeDB.greyWhenIdle        = false end
     if BuffMeDB.idleOpacity         == nil then BuffMeDB.idleOpacity         = 1.0   end
 
-    -- Per-character spell learning data (isolated per character)
-    BuffMeCharDB = BuffMeCharDB or {}
+    -- Per-character spell learning data, stored inside BuffMeDB keyed by character name.
+    -- Ascension's /reload only flushes SavedVariables (BuffMeDB), not
+    -- SavedVariablesPerCharacter (BuffMeCharDB). Storing per-char data inside BuffMeDB
+    -- ensures it survives every /reload, not just proper logouts.
+    local charName = UnitName("player") or "Unknown"
+    BuffMeDB.chars = BuffMeDB.chars or {}
+    -- One-time migration: copy existing per-character SavedVariables data into BuffMeDB
+    -- so nothing is lost on the first load after this change.
+    if not BuffMeDB.chars[charName] then
+        BuffMeDB.chars[charName] = (BuffMeCharDB and next(BuffMeCharDB)) and BuffMeCharDB or {}
+    end
+    -- Alias: all code that reads/writes BuffMeCharDB now writes into BuffMeDB.chars[charName].
+    BuffMeCharDB = BuffMeDB.chars[charName]
     -- [spellId] = { spellId, name, auraName, priority }
     BuffMeCharDB.spells              = BuffMeCharDB.spells              or {}
     -- [normalizedAuraName] = typeGroup string

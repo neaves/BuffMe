@@ -13,6 +13,8 @@ end
 
 -- Build the live candidate unit list: party members + current friendly non-party target.
 -- "target" is appended only when outside combat, the target is a player, is friendly,
+-- cannot be attacked by the player (guards against PvP-flagged same-faction players and
+-- opposite-faction targets where UnitIsFriend may behave unexpectedly on private servers),
 -- and is not already one of the party tokens (avoids double-counting a party member
 -- who is also the current target).
 local function GetCandidateUnits()
@@ -23,7 +25,8 @@ local function GetCandidateUnits()
     if not InCombatLockdown()
        and UnitExists("target")
        and UnitIsPlayer("target")
-       and UnitIsFriend("player", "target") then
+       and UnitIsFriend("player", "target")
+       and not UnitCanAttack("player", "target") then
         local alreadyIn = false
         for _, u in ipairs(PARTY_UNITS) do
             if UnitExists(u) and UnitIsUnit("target", u) then

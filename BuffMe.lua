@@ -341,9 +341,12 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- TypeGroup learning for CLEU-less buff swaps (e.g. Grove Instinct replaced by Primal
         -- Instinct — no CLEU REMOVED fires, but diff captures both sides of the swap).
         -- Only act on unambiguous 1-for-1 swaps to avoid false merges.
+        -- Also require keyword overlap: exclusive stances (e.g. Cultist "Presence of X"
+        -- vs "Whispers of X") replace each other but are different effect types — no
+        -- shared keywords means don't merge their typeGroups.
         if unit == "player" and #gained == 1 and #lost == 1 then
             local g, l = gained[1], lost[1]
-            if g ~= l then
+            if g ~= l and BuffMe_KeywordOverlap(l, g) then
                 BuffMe_Debug("Buff swap (diff): \"" .. l .. "\" → \"" .. g .. "\" — merging typeGroups")
                 BuffMe_MergeTypeGroups(l, g)
             end
@@ -529,10 +532,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         -- TypeGroup learning: if a buff was removed on this target just before
                         -- this APPLIED (CLEU REMOVED fires before APPLIED within the same
                         -- server tick), they are mutually exclusive → merge typeGroups.
+                        -- Require keyword overlap before merging: exclusive stances that replace
+                        -- each other but provide different effects (e.g. Cultist "Presence of X"
+                        -- vs "Whispers of X") share no keywords and must not be merged.
+                        -- Tooltip-based merges in HandleBouncedCast remain ungated.
                         if pendingRemovals[destGUID] then
                             local removedName = pendingRemovals[destGUID]
                             pendingRemovals[destGUID] = nil
-                            if removedName ~= spellName then
+                            if removedName ~= spellName and BuffMe_KeywordOverlap(removedName, spellName) then
                                 BuffMe_Debug("Buff replacement (CLEU): \"" .. removedName ..
                                     "\" → \"" .. spellName .. "\" — merging typeGroups")
                                 BuffMe_MergeTypeGroups(removedName, spellName)

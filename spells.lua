@@ -120,7 +120,8 @@ local function GetNameKeywords(name)
     return keywords
 end
 
--- Returns true if name1 and name2 share at least one meaningful keyword
+-- Returns true if name1 and name2 share at least one meaningful keyword (>3 chars).
+-- Also exposed as BuffMe_KeywordOverlap for use in BuffMe.lua gate checks.
 local function KeywordOverlap(name1, name2)
     local kw1 = GetNameKeywords(name1)
     for word in name2:lower():gmatch("%a+") do
@@ -130,6 +131,7 @@ local function KeywordOverlap(name1, name2)
     end
     return false
 end
+function BuffMe_KeywordOverlap(name1, name2) return KeywordOverlap(name1, name2) end
 
 -- Wipe all learned spell data, preserving config settings and the diagnostic log.
 -- Use this to evict stale entries (e.g. proc-registered spells) and start fresh.

@@ -155,6 +155,7 @@ function BuffMe_InitDB()
     if BuffMeDB.showSpellIcon       == nil then BuffMeDB.showSpellIcon       = true  end
     if BuffMeDB.compactSpellGroups  == nil then BuffMeDB.compactSpellGroups  = true  end
     if BuffMeDB.compactEffectGroups == nil then BuffMeDB.compactEffectGroups = true  end
+    if BuffMeDB.uiScale             == nil then BuffMeDB.uiScale             = 1.0   end
 
     -- Per-character spell learning data (isolated per character)
     BuffMeCharDB = BuffMeCharDB or {}
@@ -540,6 +541,53 @@ function BuffMe_RegisterAuraInTypeGroup(auraName, typeGroup)
         local found = false
         for _, m in ipairs(members) do if m == n then found = true; break end end
         if not found then table.insert(members, n) end
+    end
+end
+
+-- Scan buff lists for tooltip sigs that match known effect groups, registering any
+-- newly-discovered external auras into the matching group and typeGroup.
+-- Pass a specific unit token to scan just that unit, or nil to scan all party members.
+-- Called passively on UNIT_AURA and PARTY_MEMBERS_CHANGED so we discover weaker/equivalent
+-- external effects (e.g. another player's "Earthen Endurance" sharing Grove Instinct's sig)
+-- without waiting for a cast error to reveal them.
+function BuffMe_ScanPartyForEffectGroups(specificUnit)
+    if not next(BuffMeCharDB.effectGroups) then return end
+
+    -- Build reverse index of normalNames already in some effectGroup (built once per call)
+    local knownInEG = {}
+    for _, egEntry in pairs(BuffMeCharDB.effectGroups) do
+        for normalName in pairs(egEntry.members) do
+            knownInEG[normalName] = true
+        end
+    end
+
+    local units = specificUnit
+        and { specificUnit }
+        or { "player", "party1", "party2", "party3", "party4" }
+
+    for _, unit in ipairs(units) do
+        if UnitExists(unit) then
+            local i = 1
+            while true do
+                local buffName = UnitBuff(unit, i)
+                if not buffName then break end
+                local normalName = BuffMe_NormalizeName(buffName)
+                if not knownInEG[normalName] then
+                    local sig, value = BuffMe_GetUnitBuffInfo(unit, i)
+                    if sig and sig ~= "" then
+                        local egEntry = BuffMeCharDB.effectGroups[sig]
+                        if egEntry then
+                            BuffMe_RegisterInEffectGroup(sig, egEntry.typeGroup, normalName, buffName, value)
+                            BuffMe_RegisterAuraInTypeGroup(buffName, egEntry.typeGroup)
+                            knownInEG[normalName] = true
+                            BuffMe_Debug("Effect group match (passive): \"" .. buffName ..
+                                "\" → typeGroup \"" .. egEntry.typeGroup .. "\" on " .. unit)
+                        end
+                    end
+                end
+                i = i + 1
+            end
+        end
     end
 end
 

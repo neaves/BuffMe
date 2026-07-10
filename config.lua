@@ -87,9 +87,41 @@ resetBtn:SetScript("OnClick", function()
     if BuffMe_ResetPosition then BuffMe_ResetPosition() end
 end)
 
+-- Button Scale
+local scaleLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+scaleLabel:SetPoint("TOPLEFT", anchorBtn, "BOTTOMLEFT", 0, -20)
+scaleLabel:SetText("Button Scale")
+
+local scaleDesc = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+scaleDesc:SetPoint("TOPLEFT", scaleLabel, "BOTTOMLEFT", 0, -4)
+scaleDesc:SetWidth(400)
+scaleDesc:SetJustifyH("LEFT")
+scaleDesc:SetText("Resize the Buff Me button and icons.")
+
+local scaleSlider = CreateFrame("Slider", "BuffMeScaleSlider", panel, "OptionsSliderTemplate")
+scaleSlider:SetWidth(200)
+scaleSlider:SetMinMaxValues(50, 200)
+scaleSlider:SetValueStep(5)
+scaleSlider:SetPoint("TOPLEFT", scaleDesc, "BOTTOMLEFT", 8, -20)
+_G["BuffMeScaleSliderLow"]:SetText("50%")
+_G["BuffMeScaleSliderHigh"]:SetText("200%")
+_G["BuffMeScaleSliderText"]:SetText("")  -- title label unused; we label above
+
+local scaleValueText = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+scaleValueText:SetPoint("LEFT", scaleSlider, "RIGHT", 10, 0)
+
+scaleSlider:SetScript("OnValueChanged", function(self, value)
+    value = math.floor(value / 5 + 0.5) * 5  -- snap to nearest 5%
+    scaleValueText:SetText(value .. "%")
+    if BuffMeDB then
+        BuffMeDB.uiScale = value / 100
+        if BuffMe_ApplyScale then BuffMe_ApplyScale(BuffMeDB.uiScale) end
+    end
+end)
+
 -- ── ADVANCED ──────────────────────────────────────────────────────────────────
 
-local advLine = SectionHeader(anchorBtn, "Advanced")
+local advLine = SectionHeader(scaleSlider, "Advanced")
 
 -- Diagnostics
 local diagLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
@@ -219,6 +251,7 @@ panel:SetScript("OnShow", function()
     RefreshAnchorButton()
     RefreshDiagButton()
     RefreshLogLabel()
+    scaleSlider:SetValue(math.floor((BuffMeDB and BuffMeDB.uiScale or 1.0) * 100 + 0.5))
 end)
 
 InterfaceOptions_AddCategory(panel)

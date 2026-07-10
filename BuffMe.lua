@@ -252,6 +252,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         if name == ADDON_NAME then
             BuffMe_InitDB()
             if BuffMe_UpdateLockIcon then BuffMe_UpdateLockIcon() end
+            if BuffMe_ApplyScale     then BuffMe_ApplyScale(BuffMeDB.uiScale or 1.0) end
             DEFAULT_CHAT_FRAME:AddMessage(
                 "|cff00ccff[Buff Me]|r loaded. " ..
                 "The spell database grows as you buff your party."
@@ -260,10 +261,12 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         SnapshotPlayerBuffs()
+        BuffMe_ScanPartyForEffectGroups(nil)
         ScheduleRescan()
 
     elseif event == "PARTY_MEMBERS_CHANGED" then
         BuffMe_Debug("Party changed (" .. GetNumPartyMembers() .. " member(s))")
+        BuffMe_ScanPartyForEffectGroups(nil)
         ScheduleRescan()
 
     elseif event == "UNIT_AURA" then
@@ -346,6 +349,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
             end
         end
 
+        BuffMe_ScanPartyForEffectGroups(unit)
         ScheduleRescan()
 
     elseif event == "SPELLS_CHANGED" then
@@ -631,7 +635,12 @@ function BuffMe_PrepareCast()
 
     local spellId, targetUnit = BuffMe_GetNextCast()
     if not spellId or not targetUnit then
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r All party members are buffed!")
+        if not BuffMeCharDB or not next(BuffMeCharDB.spells) then
+            DEFAULT_CHAT_FRAME:AddMessage(
+                "|cff00ccff[Buff Me]|r Spell database is empty — cast your buff spells so Buff Me can learn them.")
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r All party members are buffed!")
+        end
         RefreshUI()
         return nil, nil
     end

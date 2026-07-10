@@ -419,6 +419,10 @@ function BuffMe_ResetPosition()
     container:SetPoint("BOTTOM", UIParent, "CENTER", 0, -215)
 end
 
+function BuffMe_ApplyScale(scale)
+    container:SetScale(scale or 1.0)
+end
+
 function BuffMe_SetCombatState(combat)
     if combat then
         mainButton:Disable()

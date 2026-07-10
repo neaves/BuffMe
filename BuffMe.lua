@@ -366,6 +366,19 @@ frame:SetScript("OnEvent", function(self, event, ...)
         ScheduleRescan()
 
     elseif event == "PLAYER_TARGET_CHANGED" then
+        if UnitExists("target") then
+            local targetName = UnitName("target") or "?"
+            local isPlayer   = UnitIsPlayer("target")
+            local isFriend   = UnitIsFriend("player", "target")
+            BuffMe_Debug("Target → " .. targetName ..
+                (isPlayer and " [player]" or " [NPC]") ..
+                (isFriend and " [friendly]" or " [hostile]"))
+            if isPlayer and isFriend then
+                BuffMe_ScanPartyForEffectGroups("target")
+            end
+        else
+            BuffMe_Debug("Target cleared")
+        end
         ScheduleRescan()
 
     elseif event == "PLAYER_REGEN_DISABLED" then
@@ -655,8 +668,19 @@ function BuffMe_PrepareCast()
         if not BuffMeCharDB or not next(BuffMeCharDB.spells) then
             DEFAULT_CHAT_FRAME:AddMessage(
                 "|cff00ccff[Buff Me]|r Spell database is empty — cast your buff spells so Buff Me can learn them.")
+            BuffMe_Debug("PrepareCast: spell DB empty")
         else
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r All party members are buffed!")
+            local knownSpells = BuffMe_GetKnownBuffSpells()
+            if #knownSpells == 0 then
+                BuffMe_Debug("PrepareCast: no eligible spells on current spec (DB has " ..
+                    (function() local n=0; for _ in pairs(BuffMeCharDB.spells) do n=n+1 end; return n end)() ..
+                    " entries, all filtered)")
+                DEFAULT_CHAT_FRAME:AddMessage(
+                    "|cff00ccff[Buff Me]|r No eligible buff spells known on current spec.")
+            else
+                BuffMe_Debug("PrepareCast: all candidates buffed (" .. #knownSpells .. " spell(s) available)")
+                DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r All party members are buffed!")
+            end
         end
         RefreshUI()
         return nil, nil

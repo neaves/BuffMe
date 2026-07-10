@@ -193,10 +193,24 @@ function BuffMe_GetNextCast()
     local playerAuras        = auraMap["player"] or {}
     local activePlayerGroups = GetActivePlayerGroups(playerAuras)
 
+    local providerCount = 0
+    for _ in pairs(providers) do providerCount = providerCount + 1 end
+    if providerCount == 0 then
+        BuffMe_Debug("GetNextCast: 0 provider spells — DB empty or all filtered by spec/cooldown")
+        return nil, nil
+    end
+
     local bestSpellId, bestUnit, bestPriority = nil, nil, -1
 
     for _, unit in ipairs(candidates) do
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and IsUnitInRange(unit) then
+            if unit == "target" then
+                local n = UnitName("target") or "?"
+                local coveredCount = 0
+                for _ in pairs(auraMap["target"] or {}) do coveredCount = coveredCount + 1 end
+                BuffMe_Debug("GetNextCast: evaluating target=" .. n ..
+                    " (" .. coveredCount .. " aura(s) scanned)")
+            end
             local unitAuras = auraMap[unit] or {}
 
             -- Split coverage into two buckets:

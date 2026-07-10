@@ -1,4 +1,4 @@
-local PARTY_UNITS    = { "player", "party1", "party2", "party3", "party4" }
+﻿local PARTY_UNITS    = { "player", "party1", "party2", "party3", "party4" }
 local ROW_HEIGHT     = 18
 local PANEL_WIDTH    = 280
 local FADE_TIME      = CHAT_FRAME_FADE_TIME or 0.5
@@ -269,7 +269,7 @@ end
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function BuffMe_UpdateBadge()
-    if not BuffMeDB then return end
+    if not BuffMeCharDB then return end
     local count = BuffMe_CountMissingBuffs()
     if count > 0 then
         badge:SetText(tostring(count))
@@ -352,7 +352,7 @@ function BuffMe_UpdatePreviewIcons()
 end
 
 function BuffMe_RefreshPanel()
-    if not panel:IsShown() or not BuffMeDB then return end
+    if not panel:IsShown() or not BuffMeCharDB then return end
 
     local providers = BuffMe_GetProviderTypeGroups()
     local rowIdx    = 0
@@ -369,7 +369,7 @@ function BuffMe_RefreshPanel()
                 local buffName = UnitBuff(unit, i)
                 if not buffName then break end
                 local normalName = BuffMe_NormalizeName(buffName)
-                local typeGroup  = BuffMeDB.auraToTypeGroup[normalName] or normalName
+                local typeGroup  = BuffMeCharDB.auraToTypeGroup[normalName] or normalName
                 unitAuras[typeGroup] = true
                 i = i + 1
             end

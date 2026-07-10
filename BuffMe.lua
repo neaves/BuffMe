@@ -1,9 +1,9 @@
-local ADDON_NAME = "BuffMe"
+﻿local ADDON_NAME = "BuffMe"
 
 function BuffMe_Debug(msg)
-    if BuffMeDB and BuffMeDB.diagnosticMode then
+    if BuffMeCharDB and BuffMeCharDB.diagnosticMode then
         DEFAULT_CHAT_FRAME:AddMessage("|cff888888[BuffMe]|r " .. tostring(msg))
-        local log = BuffMeDB.diagnosticLog
+        local log = BuffMeCharDB.diagnosticLog
         if log then
             table.insert(log, date("%H:%M:%S") .. "  " .. tostring(msg))
             if #log > 500 then
@@ -188,8 +188,8 @@ local function HandleBouncedCast(source)
             BuffMe_Debug("Blocking aura found: \"" .. blockingBuff .. "\"")
             local blockerNorm = BuffMe_NormalizeName(blockingBuff)
             local ourNorm     = BuffMe_NormalizeName(ourSpellName)
-            local blockerTG   = BuffMeDB.auraToTypeGroup[blockerNorm]
-            local ourTG       = BuffMeDB.auraToTypeGroup[ourNorm]
+            local blockerTG   = BuffMeCharDB.auraToTypeGroup[blockerNorm]
+            local ourTG       = BuffMeCharDB.auraToTypeGroup[ourNorm]
             if not blockerTG and ourTG then
                 -- Blocker is not in our DB (external/unknown buff) — register it directly
                 BuffMe_RegisterAuraInTypeGroup(blockingBuff, ourTG)
@@ -197,7 +197,7 @@ local function HandleBouncedCast(source)
             else
                 -- Both sides known — merge (or same TG already, merge is a no-op)
                 BuffMe_MergeTypeGroups(ourSpellName, blockingBuff)
-                for sid, entry in pairs(BuffMeDB.spells) do
+                for sid, entry in pairs(BuffMeCharDB.spells) do
                     if entry.auraName == blockingBuff then
                         BuffMe_Debug("Linking targetGroup: " .. tostring(ourKey) .. " + " .. tostring(sid))
                         BuffMe_LinkTargetGroup(ourKey, sid)
@@ -207,10 +207,10 @@ local function HandleBouncedCast(source)
             end
             -- Populate effect groups for both our spell and the blocker so the Effect Groups
             -- panel can display them and the optimizer can match them in future passes.
-            local ourEntry = ourKey and BuffMeDB.spells[ourKey]
+            local ourEntry = ourKey and BuffMeCharDB.spells[ourKey]
             local ourSig, ourValue = ourEntry and BuffMe_GetOurSpellInfo(ourEntry)
-            if ourSig and ourSig ~= "" and (ourTG or BuffMeDB.auraToTypeGroup[ourNorm]) then
-                local resolvedTG = ourTG or BuffMeDB.auraToTypeGroup[ourNorm]
+            if ourSig and ourSig ~= "" and (ourTG or BuffMeCharDB.auraToTypeGroup[ourNorm]) then
+                local resolvedTG = ourTG or BuffMeCharDB.auraToTypeGroup[ourNorm]
                 BuffMe_RegisterInEffectGroup(ourSig, resolvedTG, ourNorm, ourSpellName, ourValue)
                 -- Scan the blocker's tooltip; if it matches our sig, register it too
                 if UnitExists(targetUnit) then
@@ -313,11 +313,11 @@ frame:SetScript("OnEvent", function(self, event, ...)
                     if sid then
                         BuffMe_RegisterSpell(sid, pending.name, auraName)
                         -- Capture aura tooltip for effect-group matching (always self-applied).
-                        local entry = BuffMeDB.spells[sid]
+                        local entry = BuffMeCharDB.spells[sid]
                         if entry then BuffMe_CaptureAuraTooltip("player", entry) end
                         -- Record last-cast preference (UNIT_AURA fallback is always player→player).
                         local normalAura = BuffMe_NormalizeName(auraName)
-                        local tg = BuffMeDB.auraToTypeGroup[normalAura]
+                        local tg = BuffMeCharDB.auraToTypeGroup[normalAura]
                         if tg then BuffMe_RecordLastCast(tg, UnitName("player"), sid) end
                         local idStr = type(sid) == "number" and ("ID " .. sid) or ("key \"" .. sid .. "\"")
                         if auraName ~= pending.name then
@@ -408,7 +408,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                     targetUnit = "target"
                 end
                 if targetUnit then
-                    local dbKey = BuffMeDB and BuffMeDB.nameToKey and BuffMeDB.nameToKey[spellName]
+                    local dbKey = BuffMeCharDB and BuffMeCharDB.nameToKey and BuffMeCharDB.nameToKey[spellName]
                     lastCastAttempt = { spellId = dbKey, unit = targetUnit, spellName = spellName }
                     BuffMe_Debug("Cast sent: \"" .. spellName .. "\" → " .. targetUnit ..
                         (target and target ~= "" and (" (\"" .. target .. "\")") or ""))
@@ -432,10 +432,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
             -- known under a numeric key (i.e. CLEU-backed) — CLEU records their preferences
             -- independently. Synthetic-key spells (CLEU-less, like Grove Instinct) must
             -- always queue so subsequent casts can still update preferences via UNIT_AURA.
-            local numericKey = (spellId and BuffMeDB and BuffMeDB.spells[spellId] and spellId)
-                or (BuffMeDB and BuffMeDB.nameToKey
-                    and type(BuffMeDB.nameToKey[spellName]) == "number"
-                    and BuffMeDB.nameToKey[spellName])
+            local numericKey = (spellId and BuffMeCharDB and BuffMeCharDB.spells[spellId] and spellId)
+                or (BuffMeCharDB and BuffMeCharDB.nameToKey
+                    and type(BuffMeCharDB.nameToKey[spellName]) == "number"
+                    and BuffMeCharDB.nameToKey[spellName])
             if not numericKey then
                 pendingCast = { name = spellName, spellId = spellId }
             end
@@ -450,7 +450,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
         -- Verbose dump: show all cast/aura events involving the player so we can
         -- identify spells that don't arrive as SPELL_AURA_APPLIED BUFF from playerGUID
-        if BuffMeDB and BuffMeDB.diagnosticMode
+        if BuffMeCharDB and BuffMeCharDB.diagnosticMode
         and (sourceGUID == playerGUID or destGUID == playerGUID)
         and CAST_AURA_EVENTS[eventType] then
             BuffMe_Debug("CLEU " .. eventType ..
@@ -473,7 +473,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         elseif eventType == "SPELL_AURA_APPLIED" and auraType == "BUFF" then
             if sourceGUID == playerGUID then
                 if spellId and spellName then
-                    local isNew = not BuffMeDB.spells[spellId]
+                    local isNew = not BuffMeCharDB.spells[spellId]
                     if isNew and not (lastCastAttempt and lastCastAttempt.spellName == spellName) then
                         -- UNIT_SPELLCAST_SENT is the authoritative signal that the player issued a
                         -- deliberate cast from an action bar or button; it sets lastCastAttempt.
@@ -499,7 +499,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                             -- them being used on an enemy — handles spells registered in a
                             -- prior session before this guard existed.
                             if not isNew then
-                                local existingEntry = BuffMeDB.spells[spellId]
+                                local existingEntry = BuffMeCharDB.spells[spellId]
                                 if existingEntry and not existingEntry.ineligible then
                                     existingEntry.ineligible = true
                                     BuffMe_Debug("Marked ineligible (enemy-only): \"" .. spellName .. "\"")
@@ -512,14 +512,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         -- source so sigs are format-identical on both sides of comparisons.
                         local destUnit = GUIDToUnit(destGUID)
                         if destUnit then
-                            local entry = BuffMeDB.spells[spellId]
+                            local entry = BuffMeCharDB.spells[spellId]
                             if entry then BuffMe_CaptureAuraTooltip(destUnit, entry) end
                         end
                         -- Record last-cast preference for this typeGroup/target pair.
                         -- This is the authoritative confirmation the buff actually landed.
                         if destName then
                             local normalAura = BuffMe_NormalizeName(spellName)
-                            local tg = BuffMeDB.auraToTypeGroup[normalAura]
+                            local tg = BuffMeCharDB.auraToTypeGroup[normalAura]
                             if tg then BuffMe_RecordLastCast(tg, destName, spellId) end
                         end
                         -- TypeGroup learning: if a buff was removed on this target just before
@@ -583,7 +583,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                     and lastCastAttempt.unit ~= "player"
                     and lastCastAttempt.spellName == spellName then
                         local selfKey = lastCastAttempt.spellId
-                            or (BuffMeDB.nameToKey and BuffMeDB.nameToKey[spellName])
+                            or (BuffMeCharDB.nameToKey and BuffMeCharDB.nameToKey[spellName])
                         if selfKey and BuffMe_MarkSelfOnly(selfKey) then
                             BuffMe_Debug("Self-only detected (toggle/redirect): \"" ..
                                 spellName .. "\" — player buff dropped when targeting " ..

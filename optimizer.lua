@@ -1,4 +1,4 @@
-local PARTY_UNITS = { "player", "party1", "party2", "party3", "party4" }
+﻿local PARTY_UNITS = { "player", "party1", "party2", "party3", "party4" }
 
 -- UnitInRange returns nil for "player" on some builds; the player is always in range of themselves.
 local function IsUnitInRange(unit)
@@ -16,7 +16,7 @@ local function ScanPartyAuras()
     -- This lets us tag already-registered external buffs with their sig in O(1) without
     -- re-reading tooltips on every scan (tooltip reads are only needed for truly new buffs).
     local effectSigByNorm = {}
-    for sig, egEntry in pairs(BuffMeDB.effectGroups) do
+    for sig, egEntry in pairs(BuffMeCharDB.effectGroups) do
         for normalName in pairs(egEntry.members) do
             effectSigByNorm[normalName] = sig
         end
@@ -31,12 +31,12 @@ local function ScanPartyAuras()
                 local buffName, _, _, _, _, _, _, casterUnit = UnitBuff(unit, i)
                 if not buffName then break end
                 local normalName = BuffMe_NormalizeName(buffName)
-                local typeGroup = BuffMeDB.auraToTypeGroup[normalName]
-                if not typeGroup and next(BuffMeDB.effectGroups) then
+                local typeGroup = BuffMeCharDB.auraToTypeGroup[normalName]
+                if not typeGroup and next(BuffMeCharDB.effectGroups) then
                     -- Unknown buff: try to identify it via effectGroup tooltip matching
                     local sig, value = BuffMe_GetUnitBuffInfo(unit, i)
                     if sig and sig ~= "" then
-                        local egEntry = BuffMeDB.effectGroups[sig]
+                        local egEntry = BuffMeCharDB.effectGroups[sig]
                         if egEntry then
                             BuffMe_RegisterAuraInTypeGroup(buffName, egEntry.typeGroup)
                             BuffMe_RegisterInEffectGroup(sig, egEntry.typeGroup, normalName, buffName, value)
@@ -66,10 +66,10 @@ local function ScanPartyAuras()
             if unit == "player" then
                 for j = 1, GetNumTrackingTypes() do
                     local trackName, _, isActive = GetTrackingInfo(j)
-                    if isActive and trackName and BuffMeDB.nameToKey[trackName] then
+                    if isActive and trackName and BuffMeCharDB.nameToKey[trackName] then
                         local normalName = BuffMe_NormalizeName(trackName)
                         if not auraMap[unit][normalName] then
-                            local typeGroup = BuffMeDB.auraToTypeGroup[normalName] or normalName
+                            local typeGroup = BuffMeCharDB.auraToTypeGroup[normalName] or normalName
                             auraMap[unit][normalName] = {
                                 auraName  = trackName,
                                 caster    = "player",
@@ -91,7 +91,7 @@ function BuffMe_GetProviderTypeGroups()
     local knownSpells = BuffMe_GetKnownBuffSpells()
     for _, entry in ipairs(knownSpells) do
         local normalAura = BuffMe_NormalizeName(entry.auraName)
-        local typeGroup  = BuffMeDB.auraToTypeGroup[normalAura] or normalAura
+        local typeGroup  = BuffMeCharDB.auraToTypeGroup[normalAura] or normalAura
         local existing   = providers[typeGroup]
         if not existing or (entry.priority or 5) > (existing.priority or 5) then
             providers[typeGroup] = entry
@@ -119,7 +119,7 @@ local function SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
         -- cast on party members — skip them when evaluating non-player units.
         if not (entry.selfOnly and unit ~= "player") then
             local normalAura = BuffMe_NormalizeName(entry.auraName)
-            local entryTG    = BuffMeDB.auraToTypeGroup[normalAura] or normalAura
+            local entryTG    = BuffMeCharDB.auraToTypeGroup[normalAura] or normalAura
             if entryTG == typeGroup then
                 -- Skip if this spell's specific effect is already covered by an external
                 -- buff (e.g. "Whispers of Y'shaarj" covers "Grove Instinct"'s sig, but
@@ -147,9 +147,9 @@ local function GetActivePlayerGroups(playerAuras)
     local active = {}
     for normalAura, auraData in pairs(playerAuras) do
         if auraData.caster == "player" then
-            for spellId, entry in pairs(BuffMeDB.spells) do
+            for spellId, entry in pairs(BuffMeCharDB.spells) do
                 if BuffMe_NormalizeName(entry.auraName) == normalAura then
-                    local pg = BuffMeDB.spellToPlayerGroup[spellId]
+                    local pg = BuffMeCharDB.spellToPlayerGroup[spellId]
                     if pg then active[pg] = true end
                 end
             end
@@ -206,7 +206,7 @@ function BuffMe_GetNextCast()
 
                 -- Skip if our playerGroup for this spell is already active
                 if not shouldSkip then
-                    local pg = BuffMeDB.spellToPlayerGroup[selectedEntry.spellId]
+                    local pg = BuffMeCharDB.spellToPlayerGroup[selectedEntry.spellId]
                     if pg and activePlayerGroups[pg] then
                         shouldSkip = true
                     end
@@ -214,10 +214,10 @@ function BuffMe_GetNextCast()
 
                 -- Skip if unit already has a same-or-higher priority spell from our targetGroup
                 if not shouldSkip then
-                    local tg = BuffMeDB.spellToTargetGroup[selectedEntry.spellId]
+                    local tg = BuffMeCharDB.spellToTargetGroup[selectedEntry.spellId]
                     if tg then
-                        for _, tgSpellId in ipairs(BuffMeDB.targetGroupMembers[tg] or {}) do
-                            local tgEntry = BuffMeDB.spells[tgSpellId]
+                        for _, tgSpellId in ipairs(BuffMeCharDB.targetGroupMembers[tg] or {}) do
+                            local tgEntry = BuffMeCharDB.spells[tgSpellId]
                             if tgEntry then
                                 local normalTGAura = BuffMe_NormalizeName(tgEntry.auraName)
                                 if unitAuras[normalTGAura] and unitAuras[normalTGAura].caster == "player" then

@@ -281,6 +281,19 @@ frame:SetScript("OnEvent", function(self, event, ...)
             gained, lost = DiffPlayerBuffs()
         end
 
+        -- CLEU-less spell cast on a non-player "target": pendingCast was set by
+        -- UNIT_SPELLCAST_SUCCEEDED but the "player" guard below won't consume it,
+        -- leaving it alive to be incorrectly consumed by a later player UNIT_AURA.
+        -- Clear it here. Preference recording requires a buff diff which we don't
+        -- maintain for non-player units; accept the omission for now.
+        if pendingCast and unit == "target"
+        and lastCastAttempt and lastCastAttempt.unit == "target"
+        and lastCastAttempt.spellName == pendingCast.name then
+            BuffMe_Debug("Cleared pendingCast: CLEU-less \"" .. pendingCast.name ..
+                "\" cast on target (non-player — preference skipped)")
+            pendingCast = nil
+        end
+
         -- Resolve pending registration for CLEU-less spells (e.g. Grove Instinct).
         -- The spell name and aura name may differ (spell 10000 can apply aura 20000),
         -- so we use the diff list rather than name-matching.

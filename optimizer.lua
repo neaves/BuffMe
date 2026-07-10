@@ -1,8 +1,14 @@
 ﻿local PARTY_UNITS = { "player", "party1", "party2", "party3", "party4" }
 
--- UnitInRange returns nil for "player" on some builds; the player is always in range of themselves.
+-- UnitInRange was designed for party/raid frames; on Ascension's build it returns nil
+-- (not false) for non-party unit tokens like "target". Treat nil as "unknown / in range"
+-- for "target" — the player deliberately selected this unit, and a genuine out-of-range
+-- cast will fail with a clear error. Only a hard false from UnitInRange should exclude it.
 local function IsUnitInRange(unit)
-    return unit == "player" or UnitInRange(unit)
+    if unit == "player" then return true end
+    local inRange = UnitInRange(unit)
+    if inRange == nil and unit == "target" then return true end
+    return inRange
 end
 
 -- Build the live candidate unit list: party members + current friendly non-party target.

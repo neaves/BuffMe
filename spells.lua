@@ -158,6 +158,9 @@ function BuffMe_InitDB()
     if BuffMeDB.compactSpellGroups  == nil then BuffMeDB.compactSpellGroups  = true  end
     if BuffMeDB.compactEffectGroups == nil then BuffMeDB.compactEffectGroups = true  end
     if BuffMeDB.uiScale             == nil then BuffMeDB.uiScale             = 1.0   end
+    if BuffMeDB.showTooltip         == nil then BuffMeDB.showTooltip         = true  end
+    if BuffMeDB.greyWhenIdle        == nil then BuffMeDB.greyWhenIdle        = false end
+    if BuffMeDB.idleOpacity         == nil then BuffMeDB.idleOpacity         = 1.0   end
 
     -- Per-character spell learning data (isolated per character)
     BuffMeCharDB = BuffMeCharDB or {}

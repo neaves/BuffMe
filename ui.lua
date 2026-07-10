@@ -1,4 +1,8 @@
 ﻿local PARTY_UNITS    = { "player", "party1", "party2", "party3", "party4" }
+
+-- Button state tracking — shared between UpdateBadge, SetCombatState, ApplyIdleState
+local inCombat       = false
+local lastBadgeCount = 0
 local ROW_HEIGHT     = 18
 local PANEL_WIDTH    = 280
 local FADE_TIME      = CHAT_FRAME_FADE_TIME or 0.5
@@ -211,6 +215,35 @@ container:SetScript("OnMouseUp",   resumeHover)
 mainButton:HookScript("OnMouseDown", function(self) pauseHover() end)
 mainButton:HookScript("OnMouseUp",   function(self) resumeHover() end)
 
+mainButton:HookScript("OnEnter", function(self)
+    if not (BuffMeDB and BuffMeDB.showTooltip) then return end
+    if not pendingSpellId or not pendingUnit then return end
+    local spellName
+    if type(pendingSpellId) == "number" then
+        spellName = GetSpellInfo(pendingSpellId)
+    else
+        local entry = BuffMe_GetSpell(pendingSpellId)
+        if entry then spellName = entry.name end
+    end
+    local targetName = UnitName(pendingUnit)
+    if not spellName or not targetName then return end
+
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:SetText("Cast " .. spellName, 1, 1, 1)
+    GameTooltip:AddLine("on " .. targetName, 0.8, 0.8, 0.8)
+    if lastBadgeCount > 1 then
+        local more = lastBadgeCount - 1
+        GameTooltip:AddLine(more .. " more buff" .. (more ~= 1 and "s" or "") .. " to apply", 0.8, 0.8, 0.8)
+    end
+    if mainButton:IsEnabled() then
+        GameTooltip:AddLine("Right-click for party details", 0.5, 0.5, 0.5)
+    end
+    GameTooltip:Show()
+end)
+mainButton:HookScript("OnLeave", function(self)
+    GameTooltip:Hide()
+end)
+
 -- ── Button clicks ─────────────────────────────────────────────────────────────
 -- PreClick runs before the SecureActionButtonTemplate's native handler.
 -- It determines the spell and sets type/spell/unit attributes so the secure
@@ -232,8 +265,10 @@ mainButton:SetScript("PreClick", function(self, mouseButton, down)
     self:SetAttribute("unit", targetUnit)
 end)
 
-mainButton:SetScript("PostClick", function(self, mouseButton)
-    if mouseButton == "RightButton" then
+-- PostClick is not reliably fired by Ascension's secure button implementation.
+-- OnMouseUp fires for any mouse button on any enabled frame, so use that instead.
+mainButton:HookScript("OnMouseUp", function(self, button)
+    if button == "RightButton" then
         BuffMe_TogglePanel()
     end
 end)
@@ -266,11 +301,23 @@ for i = 1, 5 do
     rows[i] = row
 end
 
+-- ── Idle / opacity state ──────────────────────────────────────────────────────
+-- Called whenever button active-state may have changed (badge update, combat toggle,
+-- or config change). Applies the idleOpacity alpha to the whole container when the
+-- button is in any inactive state (in combat, or nothing to buff + greyWhenIdle).
+
+local function ApplyContainerAlpha()
+    if not BuffMeDB then return end
+    local inactive = inCombat or lastBadgeCount == 0
+    container:SetAlpha(inactive and (BuffMeDB.idleOpacity or 1.0) or 1.0)
+end
+
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function BuffMe_UpdateBadge()
     if not BuffMeCharDB then return end
     local count = BuffMe_CountMissingBuffs()
+    lastBadgeCount = count
     if count > 0 then
         badge:SetText(tostring(count))
         badge:Show()
@@ -278,6 +325,17 @@ function BuffMe_UpdateBadge()
         badge:SetText("")
         badge:Hide()
     end
+    -- Update idle grey state when not in combat (combat state is owned by SetCombatState)
+    if not inCombat then
+        if count > 0 or not (BuffMeDB and BuffMeDB.greyWhenIdle) then
+            mainButton:Enable()
+            mainButton:SetText("Buff Me!")
+        else
+            mainButton:Disable()
+            mainButton:SetText("All Buffed!")
+        end
+    end
+    ApplyContainerAlpha()
 end
 
 -- Reposition icons and resize the container based on showTargetIcon / showSpellIcon flags.
@@ -424,6 +482,7 @@ function BuffMe_ApplyScale(scale)
 end
 
 function BuffMe_SetCombatState(combat)
+    inCombat = combat
     if combat then
         mainButton:Disable()
         mainButton:SetText("In Combat")
@@ -432,5 +491,21 @@ function BuffMe_SetCombatState(combat)
     else
         mainButton:Enable()
         mainButton:SetText("Buff Me!")
+    end
+    ApplyContainerAlpha()
+end
+
+-- Called by config when greyWhenIdle or idleOpacity change, so the button
+-- immediately reflects the new settings without waiting for the next rescan.
+function BuffMe_ApplyIdleState()
+    ApplyContainerAlpha()
+    if not inCombat then
+        if lastBadgeCount > 0 or not (BuffMeDB and BuffMeDB.greyWhenIdle) then
+            mainButton:Enable()
+            mainButton:SetText("Buff Me!")
+        else
+            mainButton:Disable()
+            mainButton:SetText("All Buffed!")
+        end
     end
 end

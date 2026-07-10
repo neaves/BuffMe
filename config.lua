@@ -1,40 +1,46 @@
-﻿local panel = CreateFrame("Frame", "BuffMeOptionsPanel")
+local panel = CreateFrame("Frame", "BuffMeOptionsPanel")
 panel.name = "Buff Me"
 
--- ── Header ────────────────────────────────────────────────────────────────────
+-- ── Scrollable content area ───────────────────────────────────────────────────
+-- The InterfaceOptions panel is ~546px tall; our content exceeds that, so we
+-- wrap everything in a scroll frame.
 
-local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-title:SetPoint("TOPLEFT", 16, -16)
-title:SetText("Buff Me")
+local optScroll = CreateFrame("ScrollFrame", "BuffMeOptionsScroll", panel, "UIPanelScrollFrameTemplate")
+optScroll:SetPoint("TOPLEFT",     panel, "TOPLEFT",     10,  -6)
+optScroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28,  8)
 
-local subtitle = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
-subtitle:SetWidth(400)
-subtitle:SetJustifyH("LEFT")
-subtitle:SetText("Smart party buff manager")
+local optContent = CreateFrame("Frame", "BuffMeOptionsContent", optScroll)
+optContent:SetWidth(380)
+optContent:SetHeight(420)
+optScroll:SetScrollChild(optContent)
 
--- ── Section helper ────────────────────────────────────────────────────────────
+-- ── Helpers ───────────────────────────────────────────────────────────────────
 
-local function SectionHeader(anchorTo, label)
-    local hdr = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+-- Invisible 1px frame used as a top-of-content anchor for the first SectionHeader.
+local _contentTop = CreateFrame("Frame", nil, optContent)
+_contentTop:SetPoint("TOPLEFT", optContent, "TOPLEFT", 0, 0)
+_contentTop:SetSize(1, 1)
+
+local function SectionHeader(anchorTo, label, desc)
+    local hdr = optContent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     hdr:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, -20)
     hdr:SetTextColor(1, 0.82, 0)
     hdr:SetText(label)
 
-    local line = panel:CreateTexture(nil, "ARTWORK")
-    line:SetHeight(1)
-    line:SetPoint("TOPLEFT",  hdr,   "BOTTOMLEFT",   0,   -3)
-    line:SetPoint("TOPRIGHT", hdr,   "BOTTOMRIGHT", 560,   -3)
-    line:SetTexture("Interface\\Tooltips\\UI-Tooltip-Border")
-    line:SetTexCoord(0, 1, 0, 0.05)
+    if not desc then return hdr end
 
-    return line  -- callers anchor their first child to this line
+    local descFS = optContent:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    descFS:SetPoint("TOPLEFT", hdr, "BOTTOMLEFT", 0, -4)
+    descFS:SetWidth(360)
+    descFS:SetJustifyH("LEFT")
+    descFS:SetText(desc)
+    return descFS
 end
 
 local function Checkbox(name, anchorTo, yOffset, labelText, tipText, parent)
-    local cb = CreateFrame("CheckButton", name, parent or panel, "UICheckButtonTemplate")
+    local cb = CreateFrame("CheckButton", name, parent or optContent, "UICheckButtonTemplate")
     cb:SetSize(24, 24)
-    cb:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", -2, yOffset)
+    cb:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, yOffset)
 
     local label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     label:SetPoint("LEFT", cb, "RIGHT", 4, 0)
@@ -52,66 +58,78 @@ local function Checkbox(name, anchorTo, yOffset, labelText, tipText, parent)
     return cb
 end
 
--- ── GENERAL ───────────────────────────────────────────────────────────────────
+local function ButtonTip(btn, text)
+    btn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText(text, nil, nil, nil, nil, true)
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
 
-local genLine = SectionHeader(subtitle, "General")
+-- ── PAGE TITLE ────────────────────────────────────────────────────────────────
 
--- Show Target Icon checkbox
+local pageTitle = optContent:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+pageTitle:SetPoint("TOPLEFT", _contentTop, "BOTTOMLEFT", 0, -16)
+pageTitle:SetTextColor(1, 0.82, 0)
+pageTitle:SetText("General")
+
+local pageTitleDesc = optContent:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+pageTitleDesc:SetPoint("TOPLEFT", pageTitle, "BOTTOMLEFT", 0, -6)
+pageTitleDesc:SetWidth(360)
+pageTitleDesc:SetJustifyH("LEFT")
+pageTitleDesc:SetText("Configure the Buff Me! button, icons, and appearance. Spell learning and diagnostics are managed per character.")
+
+-- ── ICONS ─────────────────────────────────────────────────────────────────────
+
+local genLine = SectionHeader(pageTitleDesc, "Icons",
+    "Choose which icons appear alongside the button to preview the next action.")
+
 local showTargetCB = Checkbox("BuffMeShowTargetCB", genLine, -14, "Show Target Icon",
     "Display a portrait of the party member about to receive the next buff.\nMouse over the icon to see the unit tooltip.")
 
--- Show Spell Icon checkbox
-local showSpellCB = Checkbox("BuffMeShowSpellCB", showTargetCB, -6, "Show Spell Icon",
-    "Display the icon for the spell about to be cast.\nMouse over the icon to see the spell tooltip.")
+local showSpellCB = Checkbox("BuffMeShowSpellCB", showTargetCB, -14, "Show Spell Icon",
+    "Display the icon for the spell about to be cast.\nMouse over the icon to see the spell tooltip.\nRight-click the icon to ignore that spell.")
 
--- Button Anchor
-local anchorLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-anchorLabel:SetPoint("TOPLEFT", showSpellCB, "BOTTOMLEFT", 2, -24)
-anchorLabel:SetText("Button Anchor")
+-- ── BUTTON ────────────────────────────────────────────────────────────────────
 
-local anchorDesc = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-anchorDesc:SetPoint("TOPLEFT", anchorLabel, "BOTTOMLEFT", 0, -4)
-anchorDesc:SetWidth(400)
-anchorDesc:SetJustifyH("LEFT")
-anchorDesc:SetText("Lock the button in place to prevent accidental dragging.\nWhen unlocked, hover over the button and drag the title bar.")
+local btnLine = SectionHeader(showSpellCB, "Button",
+    "Controls the button's position, scale, tooltip, and idle behaviour.")
 
-local anchorBtn = CreateFrame("Button", "BuffMeAnchorToggleButton", panel, "UIPanelButtonTemplate")
+-- Anchor controls
+local anchorBtn = CreateFrame("Button", "BuffMeAnchorToggleButton", optContent, "UIPanelButtonTemplate")
 anchorBtn:SetSize(140, 24)
-anchorBtn:SetPoint("TOPLEFT", anchorDesc, "BOTTOMLEFT", 0, -10)
+anchorBtn:SetPoint("TOPLEFT", btnLine, "BOTTOMLEFT", 0, 0)
+ButtonTip(anchorBtn, "Lock the button in place to prevent accidental dragging.\nWhen unlocked, hover the button and drag the title bar.")
 
-local resetBtn = CreateFrame("Button", "BuffMeResetPositionButton", panel, "UIPanelButtonTemplate")
+local resetBtn = CreateFrame("Button", "BuffMeResetPositionButton", optContent, "UIPanelButtonTemplate")
 resetBtn:SetSize(140, 24)
 resetBtn:SetPoint("LEFT", anchorBtn, "RIGHT", 8, 0)
 resetBtn:SetText("Reset Position")
 resetBtn:SetScript("OnClick", function()
     if BuffMe_ResetPosition then BuffMe_ResetPosition() end
 end)
+ButtonTip(resetBtn, "Return the button to its default position on screen.")
 
--- Button Scale
-local scaleLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+-- Scale
+local scaleLabel = optContent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
 scaleLabel:SetPoint("TOPLEFT", anchorBtn, "BOTTOMLEFT", 0, -20)
 scaleLabel:SetText("Button Scale")
 
-local scaleDesc = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-scaleDesc:SetPoint("TOPLEFT", scaleLabel, "BOTTOMLEFT", 0, -4)
-scaleDesc:SetWidth(400)
-scaleDesc:SetJustifyH("LEFT")
-scaleDesc:SetText("Resize the Buff Me button and icons.")
-
-local scaleSlider = CreateFrame("Slider", "BuffMeScaleSlider", panel, "OptionsSliderTemplate")
+local scaleSlider = CreateFrame("Slider", "BuffMeScaleSlider", optContent, "OptionsSliderTemplate")
 scaleSlider:SetWidth(200)
 scaleSlider:SetMinMaxValues(50, 200)
 scaleSlider:SetValueStep(5)
-scaleSlider:SetPoint("TOPLEFT", scaleDesc, "BOTTOMLEFT", 8, -20)
+scaleSlider:SetPoint("TOPLEFT", scaleLabel, "BOTTOMLEFT", 8, -8)
 _G["BuffMeScaleSliderLow"]:SetText("50%")
 _G["BuffMeScaleSliderHigh"]:SetText("200%")
-_G["BuffMeScaleSliderText"]:SetText("")  -- title label unused; we label above
+_G["BuffMeScaleSliderText"]:SetText("")
 
-local scaleValueText = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+local scaleValueText = optContent:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
 scaleValueText:SetPoint("LEFT", scaleSlider, "RIGHT", 10, 0)
 
 scaleSlider:SetScript("OnValueChanged", function(self, value)
-    value = math.floor(value / 5 + 0.5) * 5  -- snap to nearest 5%
+    value = math.floor(value / 5 + 0.5) * 5
     scaleValueText:SetText(value .. "%")
     if BuffMeDB then
         BuffMeDB.uiScale = value / 100
@@ -119,62 +137,51 @@ scaleSlider:SetScript("OnValueChanged", function(self, value)
     end
 end)
 
--- ── ADVANCED ──────────────────────────────────────────────────────────────────
+-- Show Tooltip
+local showTooltipCB = Checkbox("BuffMeShowTooltipCB", scaleSlider, -12,
+    "Show button tooltip",
+    "Show a tooltip when hovering the button with the next spell, target, and queue count.")
 
-local advLine = SectionHeader(scaleSlider, "Advanced")
-
--- Diagnostics
-local diagLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-diagLabel:SetPoint("TOPLEFT", advLine, "BOTTOMLEFT", 0, -14)
-diagLabel:SetText("Diagnostics")
-
-local diagDesc = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-diagDesc:SetPoint("TOPLEFT", diagLabel, "BOTTOMLEFT", 0, -4)
-diagDesc:SetWidth(400)
-diagDesc:SetJustifyH("LEFT")
-diagDesc:SetText("Print debug messages to chat when spells are learned,\nauras change, or casts are rejected.")
-
-local diagBtn = CreateFrame("Button", "BuffMeDiagToggleButton", panel, "UIPanelButtonTemplate")
-diagBtn:SetSize(140, 24)
-diagBtn:SetPoint("TOPLEFT", diagDesc, "BOTTOMLEFT", 0, -10)
-
-local clearLogBtn = CreateFrame("Button", "BuffMeClearLogButton", panel, "UIPanelButtonTemplate")
-clearLogBtn:SetSize(140, 24)
-clearLogBtn:SetPoint("LEFT", diagBtn, "RIGHT", 8, 0)
-clearLogBtn:SetText("Clear Log")
-clearLogBtn:SetScript("OnClick", function()
-    if not BuffMeCharDB then return end
-    BuffMeCharDB.diagnosticLog = {}
-    DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Diagnostic log cleared.")
-    RefreshLogLabel()
+showTooltipCB:SetScript("OnClick", function(self)
+    if not BuffMeDB then return end
+    BuffMeDB.showTooltip = self:GetChecked() and true or false
 end)
 
-local logLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-logLabel:SetPoint("TOPLEFT", diagBtn, "BOTTOMLEFT", 0, -8)
-logLabel:SetText("")
+-- Grey when idle
+local greyWhenIdleCB = Checkbox("BuffMeGreyWhenIdleCB", showTooltipCB, -6,
+    "Grey out when nothing to do",
+    "Disable and grey out the button when all party members are fully buffed.\nIn combat the button is always greyed out regardless of this setting.")
 
--- Spell database
-local dbLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-dbLabel:SetPoint("TOPLEFT", logLabel, "BOTTOMLEFT", 0, -20)
-dbLabel:SetText("Spell Database")
+greyWhenIdleCB:SetScript("OnClick", function(self)
+    if not BuffMeDB then return end
+    BuffMeDB.greyWhenIdle = self:GetChecked() and true or false
+    if BuffMe_ApplyIdleState then BuffMe_ApplyIdleState() end
+end)
 
-local dbDesc = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-dbDesc:SetPoint("TOPLEFT", dbLabel, "BOTTOMLEFT", 0, -4)
-dbDesc:SetWidth(400)
-dbDesc:SetJustifyH("LEFT")
-dbDesc:SetText("Clears all learned spells and exclusivity groups.\nUse if proc-sourced spells were incorrectly registered.")
+-- Idle Opacity
+local opacityLabel = optContent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+opacityLabel:SetPoint("TOPLEFT", greyWhenIdleCB, "BOTTOMLEFT", 0, -16)
+opacityLabel:SetText("Idle Opacity")
 
-local resetDBBtn = CreateFrame("Button", "BuffMeResetDBButton", panel, "UIPanelButtonTemplate")
-resetDBBtn:SetSize(160, 24)
-resetDBBtn:SetPoint("TOPLEFT", dbDesc, "BOTTOMLEFT", 0, -10)
-resetDBBtn:SetText("Reset Spell Database")
-resetDBBtn:SetScript("OnClick", function()
-    if not BuffMeCharDB then return end
-    BuffMe_ResetSpellDB()
-    if BuffMe_ForceRefresh then BuffMe_ForceRefresh() end
-    DEFAULT_CHAT_FRAME:AddMessage(
-        "|cff00ccff[Buff Me]|r Spell database reset. " ..
-        "Spells will be re-learned as you cast them.")
+local opacitySlider = CreateFrame("Slider", "BuffMeOpacitySlider", optContent, "OptionsSliderTemplate")
+opacitySlider:SetWidth(200)
+opacitySlider:SetMinMaxValues(0, 100)
+opacitySlider:SetValueStep(5)
+opacitySlider:SetPoint("TOPLEFT", opacityLabel, "BOTTOMLEFT", 8, -8)
+_G["BuffMeOpacitySliderLow"]:SetText("0%")
+_G["BuffMeOpacitySliderHigh"]:SetText("100%")
+_G["BuffMeOpacitySliderText"]:SetText("")
+
+local opacityValueText = optContent:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+opacityValueText:SetPoint("LEFT", opacitySlider, "RIGHT", 10, 0)
+
+opacitySlider:SetScript("OnValueChanged", function(self, value)
+    value = math.floor(value / 5 + 0.5) * 5
+    opacityValueText:SetText(value .. "%")
+    if BuffMeDB then
+        BuffMeDB.idleOpacity = value / 100
+        if BuffMe_ApplyIdleState then BuffMe_ApplyIdleState() end
+    end
 end)
 
 -- ── Refresh helpers ───────────────────────────────────────────────────────────
@@ -187,37 +194,25 @@ local function RefreshAnchorButton()
     end
 end
 
-local function RefreshDiagButton()
-    if BuffMeCharDB and BuffMeCharDB.diagnosticMode then
-        diagBtn:SetText("Disable Diagnostics")
-    else
-        diagBtn:SetText("Enable Diagnostics")
-    end
-end
-
-function RefreshLogLabel()
-    if BuffMeCharDB and BuffMeCharDB.diagnosticLog then
-        logLabel:SetText(#BuffMeCharDB.diagnosticLog .. " entries in log (written to disk on /reload)")
-    end
-end
-
 local function RefreshCheckboxes()
     showTargetCB:SetChecked(not BuffMeDB or BuffMeDB.showTargetIcon ~= false)
     showSpellCB:SetChecked( not BuffMeDB or BuffMeDB.showSpellIcon  ~= false)
+    showTooltipCB:SetChecked(not BuffMeDB or BuffMeDB.showTooltip ~= false)
+    greyWhenIdleCB:SetChecked(BuffMeDB and BuffMeDB.greyWhenIdle or false)
 end
 
 -- ── Checkbox click handlers ───────────────────────────────────────────────────
 
 showTargetCB:SetScript("OnClick", function(self)
     if not BuffMeDB then return end
-    BuffMeDB.showTargetIcon = self:GetChecked()
+    BuffMeDB.showTargetIcon = self:GetChecked() and true or false
     if BuffMe_UpdateContainerLayout then BuffMe_UpdateContainerLayout() end
     if BuffMe_UpdatePreviewIcons    then BuffMe_UpdatePreviewIcons()    end
 end)
 
 showSpellCB:SetScript("OnClick", function(self)
     if not BuffMeDB then return end
-    BuffMeDB.showSpellIcon = self:GetChecked()
+    BuffMeDB.showSpellIcon = self:GetChecked() and true or false
     if BuffMe_UpdateContainerLayout then BuffMe_UpdateContainerLayout() end
     if BuffMe_UpdatePreviewIcons    then BuffMe_UpdatePreviewIcons()    end
 end)
@@ -231,27 +226,13 @@ anchorBtn:SetScript("OnClick", function()
     if BuffMe_UpdateLockIcon then BuffMe_UpdateLockIcon() end
 end)
 
--- ── Diag button ───────────────────────────────────────────────────────────────
-
-diagBtn:SetScript("OnClick", function()
-    if not BuffMeCharDB then return end
-    BuffMeCharDB.diagnosticMode = not BuffMeCharDB.diagnosticMode
-    RefreshDiagButton()
-    if BuffMeCharDB.diagnosticMode then
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Diagnostic mode enabled.")
-    else
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Diagnostic mode disabled.")
-    end
-end)
-
 -- ── OnShow ────────────────────────────────────────────────────────────────────
 
 panel:SetScript("OnShow", function()
     RefreshCheckboxes()
     RefreshAnchorButton()
-    RefreshDiagButton()
-    RefreshLogLabel()
     scaleSlider:SetValue(math.floor((BuffMeDB and BuffMeDB.uiScale or 1.0) * 100 + 0.5))
+    opacitySlider:SetValue(math.floor((BuffMeDB and BuffMeDB.idleOpacity or 1.0) * 100 + 0.5))
 end)
 
 InterfaceOptions_AddCategory(panel)
@@ -412,8 +393,6 @@ groupsPanel:SetScript("OnShow", function()
     gpCompactCB:SetChecked(BuffMeDB and BuffMeDB.compactSpellGroups or false)
     RefreshGroupsPanel()
 end)
-InterfaceOptions_AddCategory(groupsPanel)
-
 -- ── IGNORED SPELLS sub-panel ───────────────────────────────────────────────────
 
 local ignorePanel = CreateFrame("Frame", "BuffMeIgnorePanel")
@@ -550,8 +529,104 @@ ignorePanel:SetScript("OnShow", function()
     ipFeedback:SetText("")
     RefreshIgnorePanel()
 end)
-InterfaceOptions_AddCategory(ignorePanel)
+-- ── DIAGNOSTICS sub-panel ────────────────────────────────────────────────────
 
+local diagPanel = CreateFrame("Frame", "BuffMeDiagnosticsPanel")
+diagPanel.name   = "Diagnostics"
+diagPanel.parent = "Buff Me"
+
+local dpTitle = diagPanel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+dpTitle:SetPoint("TOPLEFT", 16, -16)
+dpTitle:SetText("Diagnostics")
+
+local dpDesc = diagPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+dpDesc:SetPoint("TOPLEFT", dpTitle, "BOTTOMLEFT", 0, -6)
+dpDesc:SetWidth(400)
+dpDesc:SetJustifyH("LEFT")
+dpDesc:SetText("Tools for diagnosing spell learning and buff detection problems. Changes take effect immediately and are saved per character.")
+
+local diagLabel = diagPanel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+diagLabel:SetPoint("TOPLEFT", dpDesc, "BOTTOMLEFT", 0, -16)
+diagLabel:SetText("Debug Output")
+
+local diagDesc = diagPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+diagDesc:SetPoint("TOPLEFT", diagLabel, "BOTTOMLEFT", 0, -4)
+diagDesc:SetWidth(360)
+diagDesc:SetJustifyH("LEFT")
+diagDesc:SetText("Print debug messages to chat when spells are learned,\nauras change, or casts are rejected.")
+
+local diagBtn = CreateFrame("Button", "BuffMeDiagToggleButton", diagPanel, "UIPanelButtonTemplate")
+diagBtn:SetSize(140, 24)
+diagBtn:SetPoint("TOPLEFT", diagDesc, "BOTTOMLEFT", 0, -10)
+
+local clearLogBtn = CreateFrame("Button", "BuffMeClearLogButton", diagPanel, "UIPanelButtonTemplate")
+clearLogBtn:SetSize(140, 24)
+clearLogBtn:SetPoint("LEFT", diagBtn, "RIGHT", 8, 0)
+clearLogBtn:SetText("Clear Log")
+
+local logLabel = diagPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+logLabel:SetPoint("TOPLEFT", diagBtn, "BOTTOMLEFT", 0, -8)
+logLabel:SetText("")
+
+local dbLabel = diagPanel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+dbLabel:SetPoint("TOPLEFT", logLabel, "BOTTOMLEFT", 0, -24)
+dbLabel:SetText("Spell Database")
+
+local dbDesc = diagPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+dbDesc:SetPoint("TOPLEFT", dbLabel, "BOTTOMLEFT", 0, -4)
+dbDesc:SetWidth(360)
+dbDesc:SetJustifyH("LEFT")
+dbDesc:SetText("Clears all learned spells and exclusivity groups.\nUse if proc-sourced spells were incorrectly registered.")
+
+local resetDBBtn = CreateFrame("Button", "BuffMeResetDBButton", diagPanel, "UIPanelButtonTemplate")
+resetDBBtn:SetSize(160, 24)
+resetDBBtn:SetPoint("TOPLEFT", dbDesc, "BOTTOMLEFT", 0, -10)
+resetDBBtn:SetText("Reset Spell Database")
+resetDBBtn:SetScript("OnClick", function()
+    if not BuffMeCharDB then return end
+    BuffMe_ResetSpellDB()
+    if BuffMe_ForceRefresh then BuffMe_ForceRefresh() end
+    DEFAULT_CHAT_FRAME:AddMessage(
+        "|cff00ccff[Buff Me]|r Spell database reset. " ..
+        "Spells will be re-learned as you cast them.")
+end)
+
+local function RefreshDiagButton()
+    if BuffMeCharDB and BuffMeCharDB.diagnosticMode then
+        diagBtn:SetText("Disable Diagnostics")
+    else
+        diagBtn:SetText("Enable Diagnostics")
+    end
+end
+
+local function RefreshLogLabel()
+    if BuffMeCharDB and BuffMeCharDB.diagnosticLog then
+        logLabel:SetText(#BuffMeCharDB.diagnosticLog .. " entries in log (written to disk on /reload)")
+    end
+end
+
+clearLogBtn:SetScript("OnClick", function()
+    if not BuffMeCharDB then return end
+    BuffMeCharDB.diagnosticLog = {}
+    DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Diagnostic log cleared.")
+    RefreshLogLabel()
+end)
+
+diagBtn:SetScript("OnClick", function()
+    if not BuffMeCharDB then return end
+    BuffMeCharDB.diagnosticMode = not BuffMeCharDB.diagnosticMode
+    RefreshDiagButton()
+    if BuffMeCharDB.diagnosticMode then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Diagnostic mode enabled.")
+    else
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Diagnostic mode disabled.")
+    end
+end)
+
+diagPanel:SetScript("OnShow", function()
+    RefreshDiagButton()
+    RefreshLogLabel()
+end)
 -- ── EFFECT GROUPS sub-panel ───────────────────────────────────────────────────
 -- Shows every tooltip-signature group with all known spell/aura variants and their values.
 -- Groups are keyed by normalized tooltip sig; members are sorted strongest first.
@@ -708,4 +783,7 @@ egPanel:SetScript("OnShow", function()
     egCompactCB:SetChecked(BuffMeDB and BuffMeDB.compactEffectGroups or false)
     RefreshEffectGroupsPanel()
 end)
+InterfaceOptions_AddCategory(ignorePanel)
+InterfaceOptions_AddCategory(groupsPanel)
 InterfaceOptions_AddCategory(egPanel)
+InterfaceOptions_AddCategory(diagPanel)

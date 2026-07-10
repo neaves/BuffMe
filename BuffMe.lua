@@ -148,11 +148,14 @@ local HARM_TARGET_PATTERNS = {
     "requires an enemy",
 }
 
--- Static set of CLEU event types relevant to cast/aura activity; used by the diagnostic dump.
+-- CLEU event types included in the diagnostic verbose dump.
+-- SPELL_CAST_START and SPELL_CAST_FAILED are intentionally omitted: they fire for
+-- every cast including combat spells and generate the bulk of diagnostic noise.
+-- SPELL_CAST_SUCCESS is kept because it identifies CLEU-less spells (no AURA_APPLIED).
 local CAST_AURA_EVENTS = {
-    SPELL_CAST_START        = true, SPELL_CAST_SUCCESS      = true,
-    SPELL_CAST_FAILED       = true, SPELL_AURA_APPLIED      = true,
-    SPELL_AURA_REMOVED      = true, SPELL_AURA_REFRESH      = true,
+    SPELL_CAST_SUCCESS      = true,
+    SPELL_AURA_APPLIED      = true, SPELL_AURA_REMOVED      = true,
+    SPELL_AURA_REFRESH      = true,
     SPELL_AURA_APPLIED_DOSE = true, SPELL_AURA_REMOVED_DOSE = true,
     SPELL_DISPEL            = true, SPELL_SUMMON            = true,
 }
@@ -398,10 +401,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
         local msg = (type(a2) == "string" and a2 ~= "" and a2)
                  or (type(a1) == "string" and a1 ~= "" and a1)
                  or nil
-        -- Log every error so unrecognised server strings are visible in diagnostic mode.
-        BuffMe_Debug("UI_ERROR [" .. tostring(a1) ..
-            (a2 ~= nil and (", " .. tostring(a2)) or "") .. "]: " .. (msg or "(no string)") ..
-            (lastCastAttempt and (" [after \"" .. (lastCastAttempt.spellName or "?") .. "\"]") or ""))
+        -- Log UI errors only when a buff cast is in flight (lastCastAttempt set).
+        -- Generic combat errors ("Spell is not ready yet", "Interrupted", etc.) that arrive
+        -- when no buff is being cast are noise; the actionable cases always have a lastCastAttempt.
+        if lastCastAttempt then
+            BuffMe_Debug("UI_ERROR [" .. tostring(a1) ..
+                (a2 ~= nil and (", " .. tostring(a2)) or "") .. "]: " .. (msg or "(no string)") ..
+                " [after \"" .. (lastCastAttempt.spellName or "?") .. "\"]")
+        end
         if lastCastAttempt and IsHarmTargetError(msg) then
             -- Spell requires a hostile target; flag it ineligible permanently.
             if BuffMe_MarkIneligible(lastCastAttempt.spellId, "requires hostile target") then

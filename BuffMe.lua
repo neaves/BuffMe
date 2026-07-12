@@ -129,11 +129,16 @@ local function RefreshUI()
     if BuffMe_RefreshPanel          then BuffMe_RefreshPanel()          end
 end
 
--- Throttle: rescans accumulate and fire once per frame via OnUpdate
+-- Throttle: rescans accumulate and fire once per frame via OnUpdate.
+-- The pendingRemovals wipe and recentlyCastName reset stay unconditional — they support
+-- CLEU learning, which keeps running in combat. Only the UI refresh (a full party-aura
+-- + spell-DB scan) is gated on `not inCombat`: the button is disabled in combat so the
+-- badge/preview can't be acted on, and any rescan requested during combat stays pending
+-- until PLAYER_REGEN_ENABLED (which calls ScheduleRescan) flushes it in one pass on exit.
 frame:SetScript("OnUpdate", function(self, elapsed)
     if next(pendingRemovals) then wipe(pendingRemovals) end  -- clear unmatched CLEU removals
     recentlyCastName = nil  -- proc guard: reset each frame after CLEU has had a chance to fire
-    if rescanPending then
+    if rescanPending and not inCombat then
         rescanPending = false
         RefreshUI()
     end
@@ -329,7 +334,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- Roster changed — drop the session-only trivial-target set rather than risk
         -- staleness (a departed member's GUID is harmless to keep, but simplest to reset).
         trivialTargets = {}
-        BuffMe_ScanPartyForEffectGroups(nil)
+        -- Full-party tooltip scan — defer to the PLAYER_REGEN_ENABLED catch-up in combat.
+        if not inCombat then
+            BuffMe_ScanPartyForEffectGroups(nil)
+        end
         ScheduleRescan()
 
     elseif event == "UNIT_AURA" then
@@ -429,7 +437,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
             end
         end
 
-        BuffMe_ScanPartyForEffectGroups(unit)
+        -- Passive effect-group discovery reads a tooltip for every unregistered buff on
+        -- `unit` — far too costly to run per UNIT_AURA in combat (procs/HoTs/DoTs churn
+        -- constantly). Skip it in combat; PLAYER_REGEN_ENABLED runs a full catch-up scan
+        -- on exit so nothing discovered during the fight is permanently missed. The learning
+        -- above (DiffPlayerBuffs, CLEU-less registration, 1-for-1 swap merges) still runs.
+        if not inCombat then
+            BuffMe_ScanPartyForEffectGroups(unit)
+        end
         ScheduleRescan()
 
     elseif event == "SPELLS_CHANGED" then
@@ -448,7 +463,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
             BuffMe_Debug("Target → " .. targetName ..
                 (isPlayer and " [player]" or " [NPC]") ..
                 (isFriend and " [friendly]" or " [hostile]"))
-            if isPlayer and isFriend then
+            if isPlayer and isFriend and not inCombat then
                 BuffMe_ScanPartyForEffectGroups("target")
             end
         else
@@ -465,6 +480,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
         inCombat = false
         BuffMe_Debug("Left combat — button re-enabled")
         if BuffMe_SetCombatState then BuffMe_SetCombatState(false) end
+        -- Catch-up: effect-group discovery was skipped for every UNIT_AURA / roster change
+        -- during combat. One full-party scan here recovers anything learnable that appeared
+        -- on the party mid-fight, then the deferred UI rescan flushes on the next frame.
+        BuffMe_ScanPartyForEffectGroups(nil)
         ScheduleRescan()
 
     elseif event == "UI_ERROR_MESSAGE" then

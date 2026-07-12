@@ -73,12 +73,12 @@ local function ScanPartyAuras()
                     -- Unknown buff: try to identify it via effectGroup tooltip matching
                     local sig, value = BuffMe_GetUnitBuffInfo(unit, i)
                     if sig and sig ~= "" then
-                        local egEntry = BuffMeCharDB.effectGroups[sig]
+                        local egEntry, matchedSig = BuffMe_FindEffectGroup(sig)
                         if egEntry then
                             BuffMe_RegisterAuraInTypeGroup(buffName, egEntry.typeGroup)
-                            BuffMe_RegisterInEffectGroup(sig, egEntry.typeGroup, normalName, buffName, value)
+                            BuffMe_RegisterInEffectGroup(matchedSig, egEntry.typeGroup, normalName, buffName, value)
                             typeGroup = egEntry.typeGroup
-                            effectSigByNorm[normalName] = sig  -- index for this session
+                            effectSigByNorm[normalName] = matchedSig  -- index for this session
                             BuffMe_Debug("Effect group match: \"" .. buffName .. "\" → typeGroup \"" .. egEntry.typeGroup .. "\"")
                         end
                     end
@@ -195,12 +195,28 @@ local function GetActivePlayerGroups(playerAuras)
     return active
 end
 
+-- Typegroups learned as "global singleton" (server allows only one live instance
+-- anywhere, e.g. "Bless") are covered for every unit as soon as any one unit has
+-- them — recasting elsewhere only relocates the buff, it never adds coverage.
+local function GetGloballyCoveredTypeGroups(auraMap, candidates)
+    local covered = {}
+    for _, unit in ipairs(candidates) do
+        for _, auraData in pairs(auraMap[unit] or {}) do
+            if not auraData.effectSig and BuffMeCharDB.globalTypeGroups[auraData.typeGroup] then
+                covered[auraData.typeGroup] = true
+            end
+        end
+    end
+    return covered
+end
+
 -- Main: return (spellId, targetUnit) for the highest-priority missing buff, or nil, nil
 function BuffMe_GetNextCast()
     local auraMap, candidates = ScanPartyAuras()
     local providers, knownSpells = BuffMe_GetProviderTypeGroups()
     local playerAuras        = auraMap["player"] or {}
     local activePlayerGroups = GetActivePlayerGroups(playerAuras)
+    local globallyCoveredTG  = GetGloballyCoveredTypeGroups(auraMap, candidates)
 
     local providerCount = 0
     for _ in pairs(providers) do providerCount = providerCount + 1 end
@@ -242,8 +258,9 @@ function BuffMe_GetNextCast()
             for typeGroup in pairs(providers) do
                 local shouldSkip = false
 
-                -- Skip if this typeGroup is already fully covered (our spell is up)
-                if coveredTG[typeGroup] then
+                -- Skip if this typeGroup is already fully covered (our spell is up),
+                -- or if it's a global-singleton typeGroup already covered on another unit.
+                if coveredTG[typeGroup] or globallyCoveredTG[typeGroup] then
                     shouldSkip = true
                 end
 
@@ -390,6 +407,7 @@ function BuffMe_CountMissingBuffs()
     local count    = 0
     local auraMap, candidates = ScanPartyAuras()
     local providers, knownSpells = BuffMe_GetProviderTypeGroups()
+    local globallyCoveredTG  = GetGloballyCoveredTypeGroups(auraMap, candidates)
 
     for _, unit in ipairs(candidates) do
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and IsUnitInRange(unit) then
@@ -405,7 +423,7 @@ function BuffMe_CountMissingBuffs()
             end
             for typeGroup, providerEntry in pairs(providers) do
                 if not (providerEntry.selfOnly and unit ~= "player") then
-                    if not coveredTG[typeGroup] then
+                    if not coveredTG[typeGroup] and not globallyCoveredTG[typeGroup] then
                         -- typeGroup not fully covered; count as missing only if at least
                         -- one spell in it has an uncovered (or unknown) effect sig.
                         local hasCastable = SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)

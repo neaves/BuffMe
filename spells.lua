@@ -62,6 +62,71 @@ local function LinesToValue(lines)
     return best
 end
 
+-- Split a pipe-joined sig into an ordered array of lines, plus its line count.
+local function SigLines(sig)
+    local lines, count = {}, 0
+    for line in (sig .. "|"):gmatch("(.-)|") do
+        if line ~= "" then
+            count = count + 1
+            lines[count] = line
+        end
+    end
+    return lines, count
+end
+
+-- Two sigs are considered the same effect if they're identical, or if every line of the
+-- shorter one is textually contained (as a plain substring, either direction) in some
+-- unused line of the longer one, within a small line-count gap.
+--
+-- Substring (not exact-equality) containment is required because a secondary effect is
+-- often appended as extra text *within* an existing line rather than as a whole new line
+-- — e.g. "Devotion of Grace" vs "Whispers of Y'shaarj":
+--   short: "restores # mana every # seconds."
+--   long:  "restores # mana every # seconds. resource costs reduced by #%."
+-- The short line is only a prefix of the long one, never an exact match. Checking
+-- substring containment in both directions also absorbs incidental punctuation drift
+-- (e.g. one side missing a trailing period) without needing special-case stripping.
+local MAX_SIG_LINE_GAP = 2
+function BuffMe_SigsMatch(sigA, sigB)
+    if sigA == sigB then return true end
+    if not sigA or sigA == "" or not sigB or sigB == "" then return false end
+    local linesA, nA = SigLines(sigA)
+    local linesB, nB = SigLines(sigB)
+    if nA == 0 or nB == 0 then return false end
+    if math.abs(nA - nB) > MAX_SIG_LINE_GAP then return false end
+    local small, big = linesA, linesB
+    if nA > nB then small, big = linesB, linesA end
+    local usedBig = {}
+    for _, sLine in ipairs(small) do
+        local matched = false
+        for bi, bLine in ipairs(big) do
+            if not usedBig[bi] and (bLine:find(sLine, 1, true) or sLine:find(bLine, 1, true)) then
+                usedBig[bi] = true
+                matched = true
+                break
+            end
+        end
+        if not matched then return false end
+    end
+    return true
+end
+
+-- Look up an effectGroups entry for a sig: exact key match first, falling back to a
+-- partial (subset-of-lines) scan via BuffMe_SigsMatch. Returns the matched entry and the
+-- canonical sig it's stored under (so callers register new members under the existing key
+-- instead of creating a near-duplicate effectGroups entry).
+function BuffMe_FindEffectGroup(sig)
+    if not sig or sig == "" then return nil, nil end
+    local exact = BuffMeCharDB.effectGroups[sig]
+    if exact then return exact, sig end
+    for existingSig, egEntry in pairs(BuffMeCharDB.effectGroups) do
+        if BuffMe_SigsMatch(sig, existingSig) then
+            return egEntry, existingSig
+        end
+    end
+    return nil, nil
+end
+
 -- Return the cached aura-sourced sig and value for a spell entry.
 -- Sigs are populated by BuffMe_CaptureAuraTooltip when a buff is observed landing;
 -- returns nil/nil until the spell has been cast and the aura seen at least once.
@@ -109,23 +174,33 @@ function BuffMe_GetUnitBuffInfo(targetUnit, index)
     return LinesToSig(lines), LinesToValue(lines)
 end
 
--- Extract meaningful keywords (length > 3) from a spell/buff name
+-- Filler/connector words that appear across unrelated spell names and must never
+-- count as a "shared keyword" (e.g. "Presence of X" vs "Whispers of X" both contain
+-- "of" but are unrelated effects). A pure length cutoff was tried first but it also
+-- discarded short, distinctive family words like "Vow" (Vow of Grace/Light/Radiance),
+-- which prevented those mutually-exclusive spells from ever being recognized as related.
+local NAME_STOPWORDS = {
+    ["of"] = true, ["the"] = true, ["and"] = true, ["for"] = true,
+    ["you"] = true, ["your"] = true, ["are"] = true, ["now"] = true,
+}
+
+-- Extract meaningful keywords (2+ letters, minus filler words) from a spell/buff name
 local function GetNameKeywords(name)
     local keywords = {}
     for word in name:lower():gmatch("%a+") do
-        if #word > 3 then
+        if #word > 2 and not NAME_STOPWORDS[word] then
             keywords[word] = true
         end
     end
     return keywords
 end
 
--- Returns true if name1 and name2 share at least one meaningful keyword (>3 chars).
+-- Returns true if name1 and name2 share at least one meaningful keyword.
 -- Also exposed as BuffMe_KeywordOverlap for use in BuffMe.lua gate checks.
 local function KeywordOverlap(name1, name2)
     local kw1 = GetNameKeywords(name1)
     for word in name2:lower():gmatch("%a+") do
-        if #word > 3 and kw1[word] then
+        if #word > 2 and not NAME_STOPWORDS[word] and kw1[word] then
             return true
         end
     end
@@ -203,6 +278,11 @@ function BuffMe_InitDB()
     -- Keyed by normalized tooltip signature (digits→#); used by the optimizer to match
     -- unknown buffs on targets to our known effect groups by comparing tooltip text.
     BuffMeCharDB.effectGroups     = BuffMeCharDB.effectGroups     or {}
+    -- [typeGroup] = true; learned when a spell's aura is observed moving from one
+    -- destGUID to a different destGUID on the same cast (server allows only one live
+    -- instance anywhere, e.g. "Bless"). The optimizer treats these typeGroups as
+    -- covered party-wide once any unit has them, instead of per-unit.
+    BuffMeCharDB.globalTypeGroups = BuffMeCharDB.globalTypeGroups or {}
     -- One-time migration: sigs are now sourced exclusively from live aura tooltips
     -- (SetUnitBuff) rather than spellbook tooltips (SetSpell). Old spellbook-sourced
     -- sigs have mana-cost and cast-time lines that aura tooltips don't, so they can
@@ -522,7 +602,7 @@ function BuffMe_FindBlockingBuff(targetUnit, ourSpellName)
                 local buffName = UnitBuff(targetUnit, i)
                 if not buffName then break end
                 local buffSig = BuffMe_GetUnitBuffInfo(targetUnit, i)
-                if buffSig == ourSig then
+                if BuffMe_SigsMatch(buffSig, ourSig) then
                     BuffMe_Debug("Tooltip match: \"" .. buffName .. "\" blocks \"" .. ourSpellName .. "\" (sig: " .. ourSig .. ")")
                     return buffName
                 end
@@ -591,9 +671,9 @@ function BuffMe_ScanPartyForEffectGroups(specificUnit)
                 if not knownInEG[normalName] then
                     local sig, value = BuffMe_GetUnitBuffInfo(unit, i)
                     if sig and sig ~= "" then
-                        local egEntry = BuffMeCharDB.effectGroups[sig]
+                        local egEntry, matchedSig = BuffMe_FindEffectGroup(sig)
                         if egEntry then
-                            BuffMe_RegisterInEffectGroup(sig, egEntry.typeGroup, normalName, buffName, value)
+                            BuffMe_RegisterInEffectGroup(matchedSig, egEntry.typeGroup, normalName, buffName, value)
                             BuffMe_RegisterAuraInTypeGroup(buffName, egEntry.typeGroup)
                             knownInEG[normalName] = true
                             BuffMe_Debug("Effect group match (passive): \"" .. buffName ..

@@ -31,6 +31,10 @@ local pendingCast     = nil  -- { name, spellId } — for CLEU-less spells learn
 local playerBuffCache = {}   -- [buffName] = true; tracks current player buffs for diff
 local pendingRemovals    = {}   -- [destGUID] = auraName; CLEU REMOVED waiting for paired APPLIED
 local recentlyCastName   = nil  -- spell name from UNIT_SPELLCAST_SUCCEEDED; cleared each frame
+local pendingSelfOnlyCheck = nil  -- { spellId, spellName } — REMOVED-on-player fired while
+                                   -- targeting someone else; awaiting the paired APPLIED to
+                                   -- tell true self-only toggle apart from a global-singleton
+                                   -- relocation (e.g. "Bless") that legitimately lands on the target.
 
 -- Build a fresh snapshot of the player's current buffs without emitting diff messages.
 -- Called on login/reload so the first real UNIT_AURA doesn't report every existing buff.
@@ -610,6 +614,50 @@ frame:SetScript("OnEvent", function(self, event, ...)
                                 BuffMe_MergeTypeGroups(removedName, spellName)
                             end
                         end
+                        -- Global-singleton learning: if this exact spell name was just removed
+                        -- from a DIFFERENT destGUID than the one it's landing on now, the server
+                        -- only allows one live instance of it anywhere (e.g. "Bless" — recasting
+                        -- on a new target strips it from whoever had it before). Mark its
+                        -- typeGroup so the optimizer treats coverage as party-wide, not per-unit.
+                        for otherGUID, removedName in pairs(pendingRemovals) do
+                            if otherGUID ~= destGUID and removedName == spellName then
+                                pendingRemovals[otherGUID] = nil
+                                local normalAura = BuffMe_NormalizeName(spellName)
+                                local tg = BuffMeCharDB.auraToTypeGroup[normalAura] or normalAura
+                                if not BuffMeCharDB.globalTypeGroups[tg] then
+                                    BuffMeCharDB.globalTypeGroups[tg] = true
+                                    BuffMe_Debug("Global-singleton detected: \"" .. spellName ..
+                                        "\" moved to " .. (destName or "?") ..
+                                        " — typeGroup \"" .. tg .. "\" is now party-wide")
+                                end
+                                break
+                            end
+                        end
+                        -- Resolve any pending self-only check (see SPELL_AURA_REMOVED) now that
+                        -- we know where this paired APPLIED actually landed: back on the caster
+                        -- confirms a true self-only toggle; landing on the intended target
+                        -- confirms a global-singleton relocation instead — not self-only.
+                        if pendingSelfOnlyCheck and pendingSelfOnlyCheck.spellName == spellName then
+                            local check = pendingSelfOnlyCheck
+                            pendingSelfOnlyCheck = nil
+                            if destGUID == playerGUID then
+                                if BuffMe_MarkSelfOnly(check.spellId) then
+                                    BuffMe_Debug("Self-only detected (toggle/redirect): \"" .. spellName ..
+                                        "\" — player buff dropped and re-landed on caster")
+                                end
+                            else
+                                BuffMe_Debug("Not self-only (relocation confirmed): \"" .. spellName ..
+                                    "\" landed on intended target " .. (destName or "?"))
+                                -- Self-heal: a prior version of this heuristic could have
+                                -- already mis-flagged this spell as self-only from an earlier
+                                -- relocation. A confirmed relocation is proof otherwise.
+                                local entry = BuffMeCharDB.spells[check.spellId]
+                                if entry and entry.selfOnly then
+                                    entry.selfOnly = nil
+                                    BuffMe_Debug("Cleared incorrect self-only flag: \"" .. spellName .. "\"")
+                                end
+                            end
+                        end
                         if not isNew then
                             BuffMe_Debug("Aura applied: \"" .. spellName .. "\" (ID " .. spellId ..
                                 ") → " .. (destName or "?"))
@@ -645,25 +693,39 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
                     -- Self-only detection via toggle/redirect: we tried to cast on a party
                     -- member but the player's own buff dropped instead of landing on them.
-                    -- Two patterns both produce this:
+                    -- Three patterns can produce this:
                     --   (a) True toggle: the spell is self-only and re-casting removes it
                     --       from the caster (Bear/Hawk/Wolf/Turtle). No APPLIED follows.
                     --   (b) Group-spread self-cast: the spell always fires on self and then
                     --       spreads (Lion 505217). The old application drops before the new
                     --       one lands, so REMOVED fires on the player first.
-                    -- In both cases, targeting a party member never helps — the spell only
-                    -- responds to "player" as the unit. Mark it self-only so the optimizer
-                    -- stops targeting party members for this typeGroup slot.
+                    --   (c) Global-singleton relocation (e.g. "Bless"): only one live instance
+                    --       exists anywhere, so casting it on a party member legitimately
+                    --       strips it from the player first, then lands on the intended
+                    --       target — NOT self-only. REMOVED always fires before its paired
+                    --       APPLIED within the same CLEU batch, so we can't yet tell (b) from
+                    --       (c) here. Defer the verdict: stash a pending check and let the
+                    --       APPLIED handler decide based on where the buff actually lands.
+                    --       If no APPLIED confirms a relocation, mark self-only on a short
+                    --       timer as the (a)/(b) fallback.
                     if destGUID == playerGUID
                     and lastCastAttempt
                     and lastCastAttempt.unit ~= "player"
                     and lastCastAttempt.spellName == spellName then
                         local selfKey = lastCastAttempt.spellId
                             or (BuffMeCharDB.nameToKey and BuffMeCharDB.nameToKey[spellName])
-                        if selfKey and BuffMe_MarkSelfOnly(selfKey) then
-                            BuffMe_Debug("Self-only detected (toggle/redirect): \"" ..
-                                spellName .. "\" — player buff dropped when targeting " ..
-                                lastCastAttempt.unit)
+                        if selfKey then
+                            local check = { spellId = selfKey, spellName = spellName }
+                            pendingSelfOnlyCheck = check
+                            C_Timer.After(0.2, function()
+                                if pendingSelfOnlyCheck == check then
+                                    pendingSelfOnlyCheck = nil
+                                    if BuffMe_MarkSelfOnly(selfKey) then
+                                        BuffMe_Debug("Self-only detected (toggle/redirect, no relocation seen): \"" ..
+                                            spellName .. "\" — player buff dropped and stayed off")
+                                    end
+                                end
+                            end)
                         end
                         lastCastAttempt = nil  -- consumed; prevents PrepareCast overwrite
                     end

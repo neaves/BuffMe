@@ -4,6 +4,16 @@
 -- (not false) for non-party unit tokens like "target". Treat nil as "unknown / in range"
 -- for "target" — the player deliberately selected this unit, and a genuine out-of-range
 -- cast will fail with a clear error. Only a hard false from UnitInRange should exclude it.
+-- true if `unit` is the player or a party-member token — used to gate partyOnly spells,
+-- which can be targeted via any non-party unit token (the BuffMe button's "target",
+-- Clique's "mouseover", etc.), not just "target".
+local function IsPartyUnit(unit)
+    for _, u in ipairs(PARTY_UNITS) do
+        if u == unit then return true end
+    end
+    return false
+end
+
 local function IsUnitInRange(unit)
     if unit == "player" then return true end
     local inRange = UnitInRange(unit)
@@ -154,7 +164,9 @@ local function SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
     for _, entry in ipairs(knownSpells) do
         -- Self-only spells (toggleable auras that only affect the caster) are never
         -- cast on party members — skip them when evaluating non-player units.
-        if not (entry.selfOnly and unit ~= "player") then
+        -- Party-only spells (rejected by the server on non-party targets — see
+        -- BuffMe_MarkPartyOnly) are never offered for a non-party unit token.
+        if not (entry.selfOnly and unit ~= "player") and not (entry.partyOnly and not IsPartyUnit(unit)) then
             local normalAura = BuffMe_NormalizeName(entry.auraName)
             local entryTG    = BuffMeCharDB.auraToTypeGroup[normalAura] or normalAura
             if entryTG == typeGroup then
@@ -422,7 +434,8 @@ function BuffMe_CountMissingBuffs()
                 end
             end
             for typeGroup, providerEntry in pairs(providers) do
-                if not (providerEntry.selfOnly and unit ~= "player") then
+                if not (providerEntry.selfOnly and unit ~= "player")
+                and not (providerEntry.partyOnly and not IsPartyUnit(unit)) then
                     if not coveredTG[typeGroup] and not globallyCoveredTG[typeGroup] then
                         -- typeGroup not fully covered; count as missing only if at least
                         -- one spell in it has an uncovered (or unknown) effect sig.

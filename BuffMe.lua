@@ -794,6 +794,37 @@ function BuffMe_PrepareCast()
     if not entry then return nil, nil end
 
     BuffMe_Debug("Casting: \"" .. entry.name .. "\" on " .. targetUnit)
-    lastCastAttempt = { spellId = spellId, unit = targetUnit, spellName = entry.name }
+    local attempt = { spellId = spellId, unit = targetUnit, spellName = entry.name }
+    lastCastAttempt = attempt
+
+    -- Some spells that require a party-member target don't return a UI_ERROR when cast
+    -- on a non-party friendly "target" — the server silently rejects the target instead
+    -- of failing the cast, so the client falls back to a manual targeting cursor instead
+    -- of reporting an error. Left alone, that cursor stays live and fires the spell at
+    -- whatever unit the player clicks next (e.g. the next party member). Detect this via
+    -- a "nothing happened" timeout: if nothing has resolved lastCastAttempt a second later
+    -- AND the targeting cursor is still up, mark the spell party-only so future casts never
+    -- offer this target for it again.
+    -- NOTE: SpellStopTargeting() cannot cancel the cursor for us — Ascension blocks it for
+    -- addons entirely ("action only available to the Blizzard UI"), combat or not, so the
+    -- call would be a silent no-op. Warn the player to clear it themselves (Esc / right-click)
+    -- instead of pretending we handled it.
+    if targetUnit == "target" then
+        C_Timer.After(1, function()
+            if lastCastAttempt == attempt and SpellIsTargeting() then
+                BuffMe_Debug("No-op timeout: \"" .. entry.name ..
+                    "\" left a targeting cursor active after casting on non-party target " ..
+                    targetUnit .. " — marked party-only")
+                if BuffMe_MarkPartyOnly(spellId) then
+                    ScheduleRescan()
+                end
+                DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r \"" .. entry.name ..
+                    "\" requires a party member — press Escape or right-click to clear the " ..
+                    "pending target cursor. It won't be suggested for this target again.")
+                lastCastAttempt = nil
+            end
+        end)
+    end
+
     return entry.name, targetUnit
 end

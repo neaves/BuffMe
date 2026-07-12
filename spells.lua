@@ -74,18 +74,56 @@ local function SigLines(sig)
     return lines, count
 end
 
+-- Filler/connector words inside tooltip lines that must never count toward a
+-- "shared effect" line match on their own (e.g. "by", "and", "all" appear in nearly
+-- every stat-buff tooltip regardless of which stats are actually affected).
+local LINE_STOPWORDS = {
+    ["by"] = true, ["and"] = true, ["all"] = true, ["the"] = true, ["a"] = true,
+    ["an"] = true, ["for"] = true, ["your"] = true, ["you"] = true, ["are"] = true,
+    ["is"] = true, ["to"] = true, ["of"] = true, ["with"] = true, ["at"] = true,
+}
+
+-- Tokenize a normalized tooltip line into a word->count multiset, dropping stopwords.
+local function LineTokenCounts(line)
+    local counts, n = {}, 0
+    for word in line:gmatch("[%a#]+") do
+        if not LINE_STOPWORDS[word] then
+            counts[word] = (counts[word] or 0) + 1
+            n = n + 1
+        end
+    end
+    return counts, n
+end
+
+-- true if every token in `small` appears in `big` with at least as high a count.
+local function TokensSubsetOf(small, big)
+    for word, cnt in pairs(small) do
+        if (big[word] or 0) < cnt then return false end
+    end
+    return true
+end
+
+-- Two tooltip lines describe the same effect if they're identical, one is a
+-- contiguous substring of the other, OR every meaningful word of one appears in the
+-- other (order-independent). The token check catches a clause *inserted mid-sentence*
+-- rather than appended at the end — e.g. "Earthen Endurance" vs "Man'ari Intuition":
+--   short: "increases armor by #, all attributes by # and all resistances by #."
+--   long:  "increases armor by # and all attributes by #."
+-- "all attributes by #" sits in the middle of the long line, so it's never a
+-- contiguous substring of the short line (the words right after "armor by #" diverge:
+-- "," vs "and") — only a word-level comparison catches it.
+local function LinesShareEffect(lineA, lineB)
+    if lineA == lineB then return true end
+    if lineA:find(lineB, 1, true) or lineB:find(lineA, 1, true) then return true end
+    local countsA, nA = LineTokenCounts(lineA)
+    local countsB, nB = LineTokenCounts(lineB)
+    if nA == 0 or nB == 0 then return false end
+    return TokensSubsetOf(countsA, countsB) or TokensSubsetOf(countsB, countsA)
+end
+
 -- Two sigs are considered the same effect if they're identical, or if every line of the
--- shorter one is textually contained (as a plain substring, either direction) in some
--- unused line of the longer one, within a small line-count gap.
---
--- Substring (not exact-equality) containment is required because a secondary effect is
--- often appended as extra text *within* an existing line rather than as a whole new line
--- — e.g. "Devotion of Grace" vs "Whispers of Y'shaarj":
---   short: "restores # mana every # seconds."
---   long:  "restores # mana every # seconds. resource costs reduced by #%."
--- The short line is only a prefix of the long one, never an exact match. Checking
--- substring containment in both directions also absorbs incidental punctuation drift
--- (e.g. one side missing a trailing period) without needing special-case stripping.
+-- shorter one shares its effect (per LinesShareEffect) with some unused line of the
+-- longer one, within a small line-count gap.
 local MAX_SIG_LINE_GAP = 2
 function BuffMe_SigsMatch(sigA, sigB)
     if sigA == sigB then return true end
@@ -100,7 +138,7 @@ function BuffMe_SigsMatch(sigA, sigB)
     for _, sLine in ipairs(small) do
         local matched = false
         for bi, bLine in ipairs(big) do
-            if not usedBig[bi] and (bLine:find(sLine, 1, true) or sLine:find(bLine, 1, true)) then
+            if not usedBig[bi] and LinesShareEffect(sLine, bLine) then
                 usedBig[bi] = true
                 matched = true
                 break
@@ -436,6 +474,31 @@ function BuffMe_MarkSelfOnly(key)
             if otherKey ~= key and otherEntry.name == sameName and not otherEntry.selfOnly then
                 otherEntry.selfOnly = true
                 BuffMe_Debug("Co-marked self-only: \"" .. otherEntry.name ..
+                    "\" (key " .. tostring(otherKey) .. ")")
+            end
+        end
+        return true
+    end
+    return false
+end
+
+-- Mark a spell as party-member-only: it can only be validly cast on "player" or a
+-- partyN unit, never the current non-party friendly "target". Detected when casting on
+-- a non-party target leaves the manual targeting cursor active with no CLEU/aura/UI_ERROR
+-- response — the server silently rejects the target instead of returning an error, so the
+-- client falls back to click-to-cast mode instead of failing the cast outright.
+-- Persists in SavedVariables; the optimizer will never offer the "target" unit for it again.
+-- Propagates to same-named entries under other keys, mirroring BuffMe_MarkSelfOnly.
+function BuffMe_MarkPartyOnly(key)
+    local entry = BuffMeCharDB.spells[key]
+    if entry and not entry.partyOnly then
+        entry.partyOnly = true
+        BuffMe_Debug("Marked party-only: \"" .. entry.name .. "\"")
+        local sameName = entry.name
+        for otherKey, otherEntry in pairs(BuffMeCharDB.spells) do
+            if otherKey ~= key and otherEntry.name == sameName and not otherEntry.partyOnly then
+                otherEntry.partyOnly = true
+                BuffMe_Debug("Co-marked party-only: \"" .. otherEntry.name ..
                     "\" (key " .. tostring(otherKey) .. ")")
             end
         end

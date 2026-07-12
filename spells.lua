@@ -446,6 +446,18 @@ local SHORT_BUFF_THRESHOLD = 120
 -- Register a buff spell we can cast (discovered via SPELL_AURA_APPLIED in combat log)
 function BuffMe_RegisterSpell(spellId, spellName, auraName)
     if BuffMeCharDB.spells[spellId] then return end  -- already known
+    -- Mounting fires SPELL_AURA_APPLIED/UNIT_AURA exactly like any other self-buff, so a
+    -- mount would otherwise get registered as a castable "buff spell" — and then every
+    -- other party member's different mount tooltip-matches into the same effect group via
+    -- the shared "increases ground speed by #%." signature (observed: 11-member
+    -- battletestedcresthorn typeGroup). IsMounted() is true by the time either registration
+    -- call site (CLEU SPELL_AURA_APPLIED, UNIT_AURA fallback) observes the new aura, since
+    -- the mounted state and the aura land together — skip registration outright rather than
+    -- marking ineligible, so mounts never enter spells/auraToTypeGroup/effectGroups at all.
+    if IsMounted() then
+        BuffMe_Debug("Skipped registration (mount): \"" .. spellName .. "\"")
+        return
+    end
     if not BuffMe_LearnModeEnabled() then
         BuffMe_Debug("Learn mode off: skipping registration of unknown spell \"" .. spellName .. "\"")
         return

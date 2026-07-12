@@ -3,6 +3,15 @@ function BuffMe_NormalizeName(name)
     return name:lower():gsub("[^%a%d]", "")
 end
 
+-- Learn Mode (config: BuffMeDB.learnMode, default ON) gates whether BuffMe auto-registers
+-- NEW spells/typeGroups/effectGroups beyond the shipped SpellDB.lua baseline. It never
+-- gates behavioral safety corrections (selfOnly/partyOnly/ineligible flags) or per-target
+-- cast preferences — those keep updating live regardless, since they're corrections to
+-- already-known spells, not new discovery. See SpellDB.lua for the full rationale.
+function BuffMe_LearnModeEnabled()
+    return not BuffMeDB or BuffMeDB.learnMode ~= false
+end
+
 -- Tooltip scan frame, created once on first use
 local scanTT
 local function GetScanTT()
@@ -248,6 +257,9 @@ function BuffMe_KeywordOverlap(name1, name2) return KeywordOverlap(name1, name2)
 
 -- Wipe all learned spell data, preserving config settings and the diagnostic log.
 -- Use this to evict stale entries (e.g. proc-registered spells) and start fresh.
+-- The official SpellDB.lua baseline (spells/typeGroups/effectGroups verified good enough
+-- to ship) is reloaded immediately after wiping, so a reset only discards in-progress
+-- live-learned data, not the shipped ground truth.
 function BuffMe_ResetSpellDB()
     BuffMeCharDB.spells              = {}
     BuffMeCharDB.nameToKey           = {}
@@ -260,6 +272,63 @@ function BuffMe_ResetSpellDB()
     BuffMeCharDB.spellToPlayerGroup  = {}
     BuffMeCharDB.playerGroupMembers  = {}
     BuffMeCharDB.lastCastForGroup    = {}
+    BuffMe_LoadOfficialDB()
+end
+
+-- Merge the shipped official spell/typeGroup/effectGroup baseline (SpellDB.lua) into this
+-- character's learned DB. Runs every login regardless of Learn Mode — Learn Mode only
+-- gates whether NEW spells/typeGroups/effectGroups get added beyond this baseline (see
+-- BuffMe_RegisterSpell, BuffMe_MergeTypeGroups, BuffMe_RegisterInEffectGroup). Never
+-- overwrites data the character has already learned/customized; official data only fills
+-- gaps, so a hand-tuned priority or an already-discovered relationship always wins.
+function BuffMe_LoadOfficialDB()
+    local official = BuffMe_OfficialDB
+    if not official then return end
+
+    for spellId, off in pairs(official.spells or {}) do
+        if not BuffMeCharDB.spells[spellId] then
+            BuffMeCharDB.spells[spellId] = {
+                spellId      = spellId,
+                name         = off.name,
+                auraName     = off.auraName or off.name,
+                priority     = off.priority or 5,
+                tooltipSig   = off.tooltipSig,
+                tooltipValue = off.tooltipValue,
+                selfOnly     = off.selfOnly or nil,
+                partyOnly    = off.partyOnly or nil,
+                ineligible   = off.ineligible or nil,
+            }
+            BuffMeCharDB.nameToKey[off.name] = spellId
+            BuffMeCharDB.auraDisplayNames[BuffMe_NormalizeName(off.auraName or off.name)] = off.auraName or off.name
+        end
+    end
+
+    for normalAura, typeGroup in pairs(official.auraToTypeGroup or {}) do
+        if not BuffMeCharDB.auraToTypeGroup[normalAura] then
+            BuffMeCharDB.auraToTypeGroup[normalAura] = typeGroup
+            local members = BuffMeCharDB.typeGroupMembers[typeGroup]
+            if not members then
+                members = {}
+                BuffMeCharDB.typeGroupMembers[typeGroup] = members
+            end
+            local found = false
+            for _, m in ipairs(members) do if m == normalAura then found = true; break end end
+            if not found then table.insert(members, normalAura) end
+        end
+    end
+
+    for sig, offGroup in pairs(official.effectGroups or {}) do
+        local group = BuffMeCharDB.effectGroups[sig]
+        if not group then
+            group = { typeGroup = offGroup.typeGroup, members = {} }
+            BuffMeCharDB.effectGroups[sig] = group
+        end
+        for normalName, memberData in pairs(offGroup.members or {}) do
+            if not group.members[normalName] then
+                group.members[normalName] = { name = memberData.name, value = memberData.value or 0 }
+            end
+        end
+    end
 end
 
 function BuffMe_InitDB()
@@ -274,6 +343,9 @@ function BuffMe_InitDB()
     if BuffMeDB.showTooltip         == nil then BuffMeDB.showTooltip         = true  end
     if BuffMeDB.greyWhenIdle        == nil then BuffMeDB.greyWhenIdle        = false end
     if BuffMeDB.idleOpacity         == nil then BuffMeDB.idleOpacity         = 1.0   end
+    -- Learn Mode defaults ON until SpellDB.lua's official baseline is built out enough
+    -- that most players never need live discovery at all. See BuffMe_LearnModeEnabled.
+    if BuffMeDB.learnMode           == nil then BuffMeDB.learnMode           = true  end
 
     -- Per-character spell learning data, stored inside BuffMeDB keyed by character name.
     -- Ascension's /reload only flushes SavedVariables (BuffMeDB), not
@@ -335,6 +407,8 @@ function BuffMe_InitDB()
         end
         BuffMeCharDB.auraSigV2 = true
     end
+
+    BuffMe_LoadOfficialDB()
 end
 
 -- Record which spell was last cast for a typeGroup on a named target.
@@ -372,6 +446,10 @@ local SHORT_BUFF_THRESHOLD = 120
 -- Register a buff spell we can cast (discovered via SPELL_AURA_APPLIED in combat log)
 function BuffMe_RegisterSpell(spellId, spellName, auraName)
     if BuffMeCharDB.spells[spellId] then return end  -- already known
+    if not BuffMe_LearnModeEnabled() then
+        BuffMe_Debug("Learn mode off: skipping registration of unknown spell \"" .. spellName .. "\"")
+        return
+    end
 
     local entry = {
         spellId  = spellId,
@@ -527,6 +605,10 @@ function BuffMe_MergeTypeGroups(auraName1, auraName2)
     local tg2 = BuffMeCharDB.auraToTypeGroup[n2]
 
     if not tg1 or not tg2 or tg1 == tg2 then return end
+    if not BuffMe_LearnModeEnabled() then
+        BuffMe_Debug("Learn mode off: skipping typeGroup merge (" .. auraName1 .. " vs " .. auraName2 .. ")")
+        return
+    end
 
     BuffMe_Debug("TypeGroup merge: \"" .. tg2 .. "\" folded into \"" .. tg1 .. "\" (via " .. auraName1 .. " vs " .. auraName2 .. ")")
 
@@ -684,6 +766,12 @@ function BuffMe_RegisterInEffectGroup(sig, typeGroup, normalName, displayName, v
     if not sig or sig == "" or not typeGroup or not normalName then return end
     local group = BuffMeCharDB.effectGroups[sig]
     if not group then
+        -- Creating a brand-new effect group is "new discovery" — gated by Learn Mode.
+        -- Adding a member to an already-known group (below) is not; it always runs.
+        if not BuffMe_LearnModeEnabled() then
+            BuffMe_Debug("Learn mode off: skipping new effect group for \"" .. displayName .. "\"")
+            return
+        end
         group = { typeGroup = typeGroup, members = {} }
         BuffMeCharDB.effectGroups[sig] = group
     end

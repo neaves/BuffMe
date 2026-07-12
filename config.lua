@@ -656,9 +656,24 @@ dbDesc:SetWidth(360)
 dbDesc:SetJustifyH("LEFT")
 dbDesc:SetText("Clears all learned spells and exclusivity groups.\nUse if proc-sourced spells were incorrectly registered.")
 
+local learnModeCB = Checkbox("BuffMeLearnModeCB", dbDesc, -10,
+    "Learn Mode",
+    "When on, BuffMe auto-registers new spells, exclusivity groups, and effect groups " ..
+    "as you play. When off, it only ever suggests/matches spells and relationships already " ..
+    "in the official database (SpellDB.lua) or previously learned — nothing new is " ..
+    "auto-discovered. Safety corrections (self-only, party-only, ineligible) and per-target " ..
+    "cast preferences always keep working regardless of this setting.", diagPanel)
+
+learnModeCB:SetScript("OnClick", function(self)
+    if not BuffMeDB then return end
+    BuffMeDB.learnMode = self:GetChecked() and true or false
+    DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Buff Me]|r Learn mode " ..
+        (BuffMeDB.learnMode and "enabled." or "disabled."))
+end)
+
 local resetDBBtn = CreateFrame("Button", "BuffMeResetDBButton", diagPanel, "UIPanelButtonTemplate")
 resetDBBtn:SetSize(160, 24)
-resetDBBtn:SetPoint("TOPLEFT", dbDesc, "BOTTOMLEFT", 0, -10)
+resetDBBtn:SetPoint("TOPLEFT", learnModeCB, "BOTTOMLEFT", 0, -10)
 resetDBBtn:SetText("Reset Spell Database")
 resetDBBtn:SetScript("OnClick", function()
     if not BuffMeCharDB then return end
@@ -666,7 +681,10 @@ resetDBBtn:SetScript("OnClick", function()
     if BuffMe_ForceRefresh then BuffMe_ForceRefresh() end
     DEFAULT_CHAT_FRAME:AddMessage(
         "|cff00ccff[Buff Me]|r Spell database reset. " ..
-        "Spells will be re-learned as you cast them.")
+        "The official baseline (SpellDB.lua) was reloaded" ..
+        (BuffMeDB and BuffMeDB.learnMode == false
+            and "; enable Learn Mode to re-learn anything beyond it."
+            or "; new spells will be re-learned as you cast them."))
 end)
 
 local function RefreshDiagButton()
@@ -704,6 +722,7 @@ end)
 diagPanel:SetScript("OnShow", function()
     RefreshDiagButton()
     RefreshLogLabel()
+    learnModeCB:SetChecked(not BuffMeDB or BuffMeDB.learnMode ~= false)
 end)
 -- ── EFFECT GROUPS sub-panel ───────────────────────────────────────────────────
 -- Shows every tooltip-signature group with all known spell/aura variants and their values.

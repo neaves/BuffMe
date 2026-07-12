@@ -30,13 +30,16 @@ end
 local function GetCandidateUnits()
     local units = {}
     for _, u in ipairs(PARTY_UNITS) do
-        units[#units + 1] = u
+        if not (UnitExists(u) and BuffMe_IsTrivialTarget(u)) then
+            units[#units + 1] = u
+        end
     end
     if not InCombatLockdown()
        and UnitExists("target")
        and UnitIsPlayer("target")
        and UnitIsFriend("player", "target")
-       and not UnitCanAttack("player", "target") then
+       and not UnitCanAttack("player", "target")
+       and not BuffMe_IsTrivialTarget("target") then
         local alreadyIn = false
         for _, u in ipairs(PARTY_UNITS) do
             if UnitExists(u) and UnitIsUnit("target", u) then
@@ -433,16 +436,20 @@ function BuffMe_CountMissingBuffs()
                     coveredTG[auraData.typeGroup] = true
                 end
             end
-            for typeGroup, providerEntry in pairs(providers) do
-                if not (providerEntry.selfOnly and unit ~= "player")
-                and not (providerEntry.partyOnly and not IsPartyUnit(unit)) then
-                    if not coveredTG[typeGroup] and not globallyCoveredTG[typeGroup] then
-                        -- typeGroup not fully covered; count as missing only if at least
-                        -- one spell in it has an uncovered (or unknown) effect sig.
-                        local hasCastable = SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
-                        if hasCastable then
-                            count = count + 1
-                        end
+            for typeGroup in pairs(providers) do
+                -- No top-level selfOnly/partyOnly pre-filter here: a typeGroup can contain
+                -- a mix of member spells (e.g. "Boon of the Turtle" is selfOnly but sibling
+                -- "Boon of the Bear" isn't), so gating on one arbitrary representative entry
+                -- (as BuffMe_GetProviderTypeGroups picks) incorrectly skips the whole group.
+                -- SelectSpellForGroup already applies selfOnly/partyOnly per individual
+                -- entry — its nil/non-nil return is the only signal needed, matching
+                -- BuffMe_GetNextCast so the badge count and the suggested-cast icon agree.
+                if not coveredTG[typeGroup] and not globallyCoveredTG[typeGroup] then
+                    -- typeGroup not fully covered; count as missing only if at least
+                    -- one spell in it has an uncovered (or unknown) effect sig.
+                    local hasCastable = SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
+                    if hasCastable then
+                        count = count + 1
                     end
                 end
             end

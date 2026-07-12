@@ -17,6 +17,19 @@ local inCombat        = false
 local lastCastAttempt = nil  -- { spellId, unit, spellName } — for error-based learning
 local rescanPending   = false
 
+-- [guid] = true; units BuffMe cannot interact with at all this session ("Can't target
+-- trivial" — on Ascension this fires for real, appropriately-leveled players who are
+-- isolated by a challenge/instance mechanic like "Adventure Mode", not just low-level
+-- targets). Session-only by design: in-memory, never written to SavedVariables, so it
+-- clears itself on reload/logout and is also wiped on every party roster change.
+local trivialTargets = {}
+
+-- true if `unit` was rejected with "Can't target trivial" this session.
+function BuffMe_IsTrivialTarget(unit)
+    local guid = unit and UnitGUID(unit)
+    return guid ~= nil and trivialTargets[guid] or false
+end
+
 -- Resolve a unit GUID to a unit token by checking player + current party + target.
 local function GUIDToUnit(guid)
     if not guid then return nil end
@@ -152,6 +165,14 @@ local HARM_TARGET_PATTERNS = {
     "requires an enemy",
 }
 
+-- Detect "can't target trivial" rejections. Despite the wording this isn't only a level
+-- check on Ascension — it also fires for real, correctly-leveled players isolated by a
+-- challenge/instance mechanic (e.g. "Adventure Mode"). Either way it's a per-target, not
+-- per-spell, restriction: any buff would bounce the same way. Session-only exclusion.
+local TRIVIAL_TARGET_PATTERNS = {
+    "target trivial",
+}
+
 -- Detect "invalid target" rejections. Clear the in-flight cast attempt to stop the
 -- retry cascade; do not permanently modify the spell DB (the error is too ambiguous).
 local INVALID_TARGET_PATTERNS = {
@@ -189,6 +210,15 @@ local function IsHarmTargetError(msg)
     return false
 end
 
+local function IsTrivialTargetError(msg)
+    if type(msg) ~= "string" then return false end
+    local lower = msg:lower()
+    for _, pat in ipairs(TRIVIAL_TARGET_PATTERNS) do
+        if lower:find(pat, 1, true) then return true end
+    end
+    return false
+end
+
 local function IsInvalidTargetError(msg)
     if type(msg) ~= "string" then return false end
     local lower = msg:lower()
@@ -216,9 +246,14 @@ local function HandleBouncedCast(source)
             local blockerTG   = BuffMeCharDB.auraToTypeGroup[blockerNorm]
             local ourTG       = BuffMeCharDB.auraToTypeGroup[ourNorm]
             if not blockerTG and ourTG then
-                -- Blocker is not in our DB (external/unknown buff) — register it directly
-                BuffMe_RegisterAuraInTypeGroup(blockingBuff, ourTG)
-                BuffMe_Debug("Registered external blocker \"" .. blockingBuff .. "\" in typeGroup \"" .. ourTG .. "\"")
+                -- Blocker is not in our DB (external/unknown buff) — register it directly.
+                -- New-relationship discovery, gated by Learn Mode.
+                if BuffMe_LearnModeEnabled() then
+                    BuffMe_RegisterAuraInTypeGroup(blockingBuff, ourTG)
+                    BuffMe_Debug("Registered external blocker \"" .. blockingBuff .. "\" in typeGroup \"" .. ourTG .. "\"")
+                else
+                    BuffMe_Debug("Learn mode off: skipping registration of external blocker \"" .. blockingBuff .. "\"")
+                end
             else
                 -- Both sides known — merge (or same TG already, merge is a no-op)
                 BuffMe_MergeTypeGroups(ourSpellName, blockingBuff)
@@ -291,6 +326,9 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     elseif event == "PARTY_MEMBERS_CHANGED" then
         BuffMe_Debug("Party changed (" .. GetNumPartyMembers() .. " member(s))")
+        -- Roster changed — drop the session-only trivial-target set rather than risk
+        -- staleness (a departed member's GUID is harmless to keep, but simplest to reset).
+        trivialTargets = {}
         BuffMe_ScanPartyForEffectGroups(nil)
         ScheduleRescan()
 
@@ -446,6 +484,17 @@ frame:SetScript("OnEvent", function(self, event, ...)
         if lastCastAttempt and IsHarmTargetError(msg) then
             -- Spell requires a hostile target; flag it ineligible permanently.
             if BuffMe_MarkIneligible(lastCastAttempt.spellId, "requires hostile target") then
+                ScheduleRescan()
+            end
+            lastCastAttempt = nil
+        elseif lastCastAttempt and IsTrivialTargetError(msg) then
+            -- Per-target, not per-spell — any buff would bounce the same way. Exclude the
+            -- unit (by GUID) from candidacy for the rest of this session; never persisted.
+            local guid = UnitGUID(lastCastAttempt.unit)
+            if guid then
+                trivialTargets[guid] = true
+                BuffMe_Debug("Marked trivial/unreachable target this session: \"" ..
+                    (UnitName(lastCastAttempt.unit) or "?") .. "\"")
                 ScheduleRescan()
             end
             lastCastAttempt = nil

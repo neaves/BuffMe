@@ -326,6 +326,17 @@ function BuffMe_GetNextCast()
         end
     end
 
+    -- Group-cast spells ("Greater" auras) apply to the whole party/raid from a single
+    -- self-cast and reject any other target. Coverage is still correctly detected per-unit
+    -- above (each member gets a real aura instance), but the actual cast must always be
+    -- aimed at "player" regardless of which member's gap triggered the selection.
+    if bestSpellId then
+        local bestSpellEntry = BuffMe_GetSpell(bestSpellId)
+        if bestSpellEntry and bestSpellEntry.groupCast then
+            bestUnit = "player"
+        end
+    end
+
     return bestSpellId, bestUnit
 end
 

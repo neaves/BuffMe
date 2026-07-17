@@ -547,7 +547,9 @@ hoverButton:SetScript("PreClick", function(self, mouseButton, down)
         self:SetAttribute("type", "")
         return
     end
+    -- Group-cast spells ("Greater" auras) always cast on "player" and reject any other
+    -- target, even though BuffMe_GetBestCastForUnit evaluated the gap on "mouseover".
     self:SetAttribute("type",  "spell")
     self:SetAttribute("spell", spellName)
-    self:SetAttribute("unit",  "mouseover")
+    self:SetAttribute("unit",  spellEntry.groupCast and "player" or "mouseover")
 end)

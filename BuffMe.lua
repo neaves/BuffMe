@@ -48,6 +48,9 @@ local pendingSelfOnlyCheck = nil  -- { spellId, spellName } — REMOVED-on-playe
                                    -- targeting someone else; awaiting the paired APPLIED to
                                    -- tell true self-only toggle apart from a global-singleton
                                    -- relocation (e.g. "Bless") that legitimately lands on the target.
+local pendingGroupCastGUIDs = {}  -- [spellName] = { [destGUID] = true, ... }; accumulates
+                                   -- distinct destinations of a single self-cast within the
+                                   -- frame it lands, to detect "Greater"-style group-wide auras.
 
 -- Build a fresh snapshot of the player's current buffs without emitting diff messages.
 -- Called on login/reload so the first real UNIT_AURA doesn't report every existing buff.
@@ -129,18 +132,37 @@ local function RefreshUI()
     if BuffMe_RefreshPanel          then BuffMe_RefreshPanel()          end
 end
 
--- Throttle: rescans accumulate and fire once per frame via OnUpdate.
--- The pendingRemovals wipe and recentlyCastName reset stay unconditional — they support
--- CLEU learning, which keeps running in combat. Only the UI refresh (a full party-aura
--- + spell-DB scan) is gated on `not inCombat`: the button is disabled in combat so the
--- badge/preview can't be acted on, and any rescan requested during combat stays pending
--- until PLAYER_REGEN_ENABLED (which calls ScheduleRescan) flushes it in one pass on exit.
+-- Throttle: rescans accumulate and fire at most once per REFRESH_THROTTLE seconds via
+-- OnUpdate, instead of once per frame. RefreshUI does a full party aura scan plus the
+-- optimizer pass (BuffMe_GetNextCast) — cheap for one call, but UNIT_AURA/roster/target
+-- events can arrive in bursts (nameplates, procs, other party members' auras ticking) in
+-- a dungeon, and re-running the full pass every single frame during such a burst is the
+-- source of visible stutter. A few seconds of staleness on the badge/preview icons is a
+-- non-issue since the button itself always resolves the live state on click.
+-- The pendingRemovals wipe and recentlyCastName reset stay unconditional and per-frame —
+-- they support CLEU learning, which keeps running in combat, and are trivial single-check
+-- costs regardless of frequency.
+local REFRESH_THROTTLE = 2
+local lastRefreshTime = 0
 frame:SetScript("OnUpdate", function(self, elapsed)
     if next(pendingRemovals) then wipe(pendingRemovals) end  -- clear unmatched CLEU removals
+    if next(pendingGroupCastGUIDs) then wipe(pendingGroupCastGUIDs) end  -- clear group-cast batch
     recentlyCastName = nil  -- proc guard: reset each frame after CLEU has had a chance to fire
-    if rescanPending and not inCombat then
-        rescanPending = false
-        RefreshUI()
+    if not inCombat then
+        local now = GetTime()
+        if now - lastRefreshTime >= REFRESH_THROTTLE then
+            lastRefreshTime = now
+            -- Drain a batch of the effect-group discovery queue (tooltip reads — the
+            -- expensive step) every tick. A match means new coverage data landed, so
+            -- force a refresh even if nothing else requested one this tick.
+            if BuffMe_ProcessScanQueue and BuffMe_ProcessScanQueue() then
+                rescanPending = true
+            end
+            if rescanPending then
+                rescanPending = false
+                RefreshUI()
+            end
+        end
     end
 end)
 
@@ -342,6 +364,15 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     elseif event == "UNIT_AURA" then
         local unit = ...
+        -- UNIT_AURA is registered without RegisterUnitEvent, so it fires for every unit
+        -- token the client is tracking auras for — nameplates, nearby mobs, other players'
+        -- pets, etc. — not just our party. In a dungeon that's a constant stream of
+        -- irrelevant events. Only player/party/target auras can ever affect buff coverage,
+        -- so bail immediately for anything else before doing any diffing, tooltip scanning,
+        -- or triggering a rescan.
+        if unit ~= "player" and unit ~= "target" and not unit:match("^party%d$") then
+            return
+        end
         local gained, lost = {}, {}
         if unit == "player" then
             gained, lost = DiffPlayerBuffs()
@@ -651,6 +682,34 @@ frame:SetScript("OnEvent", function(self, event, ...)
                             end
                         else
                         BuffMe_RegisterSpell(spellId, spellName, spellName)
+                        -- Group-cast detection ("Greater" auras): a single self-targeted cast
+                        -- that applies to the whole party/raid fires one SPELL_AURA_APPLIED per
+                        -- destination, all within the same batch. Accumulate distinct destGUIDs
+                        -- per spell name (wiped every frame in OnUpdate); once we've seen the
+                        -- player plus at least one other unit for the same cast, it's confirmed
+                        -- group-wide — mark it so the optimizer always casts it on "player"
+                        -- regardless of which member's coverage gap triggered it.
+                        do
+                            local gcSet = pendingGroupCastGUIDs[spellName]
+                            if not gcSet then
+                                gcSet = {}
+                                pendingGroupCastGUIDs[spellName] = gcSet
+                            end
+                            gcSet[destGUID] = true
+                            if gcSet[playerGUID] then
+                                local distinctCount = 0
+                                for _ in pairs(gcSet) do distinctCount = distinctCount + 1 end
+                                if distinctCount >= 2 then
+                                    local gcEntry = BuffMeCharDB.spells[spellId]
+                                    if gcEntry and not gcEntry.groupCast then
+                                        BuffMe_MarkGroupCast(spellId)
+                                        BuffMe_Debug("Group-cast confirmed: \"" .. spellName ..
+                                            "\" applied to " .. distinctCount ..
+                                            " units from one self-cast")
+                                    end
+                                end
+                            end
+                        end
                         -- Capture the aura's tooltip sig for effect-group matching.
                         -- We use the live unit-buff tooltip (SetUnitBuff) as the sole
                         -- source so sigs are format-identical on both sides of comparisons.

@@ -597,6 +597,31 @@ function BuffMe_MarkPartyOnly(key)
     return false
 end
 
+-- Mark a spell as group-cast: a single self-targeted cast applies the aura to every
+-- party/raid member simultaneously (e.g. "Greater" blessings), regardless of line of
+-- sight. Detected when a CLEU SPELL_AURA_APPLIED batch from one cast lands on 2+ distinct
+-- destGUIDs including the player. The optimizer still evaluates coverage per-unit as
+-- normal (each member gets a real aura instance, so gaps are detected correctly), but the
+-- actual cast must always target "player" — these spells reject/ignore any other target.
+-- Propagates to same-named entries under other keys, mirroring BuffMe_MarkSelfOnly.
+function BuffMe_MarkGroupCast(key)
+    local entry = BuffMeCharDB.spells[key]
+    if entry and not entry.groupCast then
+        entry.groupCast = true
+        BuffMe_Debug("Marked group-cast: \"" .. entry.name .. "\"")
+        local sameName = entry.name
+        for otherKey, otherEntry in pairs(BuffMeCharDB.spells) do
+            if otherKey ~= key and otherEntry.name == sameName and not otherEntry.groupCast then
+                otherEntry.groupCast = true
+                BuffMe_Debug("Co-marked group-cast: \"" .. otherEntry.name ..
+                    "\" (key " .. tostring(otherKey) .. ")")
+            end
+        end
+        return true
+    end
+    return false
+end
+
 -- Mark a spell ineligible for auto-buffing (hostile-target requirement, cooldown, etc.).
 -- Persists in SavedVariables so the decision survives reloads.
 function BuffMe_MarkIneligible(key, reason)
@@ -803,12 +828,20 @@ function BuffMe_RegisterAuraInTypeGroup(auraName, typeGroup)
     end
 end
 
--- Scan buff lists for tooltip sigs that match known effect groups, registering any
--- newly-discovered external auras into the matching group and typeGroup.
--- Pass a specific unit token to scan just that unit, or nil to scan all party members.
--- Called passively on UNIT_AURA and PARTY_MEMBERS_CHANGED so we discover weaker/equivalent
--- external effects (e.g. another player's "Earthen Endurance" sharing Grove Instinct's sig)
--- without waiting for a cast error to reveal them.
+-- Effect-group discovery is split into a cheap enqueue phase (this function — just table
+-- lookups over UnitBuff, no tooltip reads) and a throttled batch-drain phase
+-- (BuffMe_ProcessScanQueue) that resolves the actual expensive step, one tooltip read per
+-- unregistered aura, a handful at a time. Without this split, entering a dungeon with
+-- several party members each carrying multiple unrecognized buffs would resolve all of
+-- them synchronously in one frame — a visible stutter.
+local scanQueue = {}
+local scanQueueSeen = {}  -- "unit\0normalName" -> true, de-dupes pending queue entries
+
+-- Scan buff lists for auras not yet known to any effect group and queue them for batched
+-- tooltip resolution. Pass a specific unit token to scan just that unit, or nil to scan
+-- all party members. Called passively on UNIT_AURA and PARTY_MEMBERS_CHANGED so we discover
+-- weaker/equivalent external effects (e.g. another player's "Earthen Endurance" sharing
+-- Grove Instinct's sig) without waiting for a cast error to reveal them.
 function BuffMe_ScanPartyForEffectGroups(specificUnit)
     if not next(BuffMeCharDB.effectGroups) then return end
 
@@ -832,22 +865,67 @@ function BuffMe_ScanPartyForEffectGroups(specificUnit)
                 if not buffName then break end
                 local normalName = BuffMe_NormalizeName(buffName)
                 if not knownInEG[normalName] then
-                    local sig, value = BuffMe_GetUnitBuffInfo(unit, i)
-                    if sig and sig ~= "" then
-                        local egEntry, matchedSig = BuffMe_FindEffectGroup(sig)
-                        if egEntry then
-                            BuffMe_RegisterInEffectGroup(matchedSig, egEntry.typeGroup, normalName, buffName, value)
-                            BuffMe_RegisterAuraInTypeGroup(buffName, egEntry.typeGroup)
-                            knownInEG[normalName] = true
-                            BuffMe_Debug("Effect group match (passive): \"" .. buffName ..
-                                "\" → typeGroup \"" .. egEntry.typeGroup .. "\" on " .. unit)
-                        end
+                    local key = unit .. "\0" .. normalName
+                    if not scanQueueSeen[key] then
+                        scanQueueSeen[key] = true
+                        scanQueue[#scanQueue + 1] = { unit = unit, normalName = normalName }
                     end
                 end
                 i = i + 1
             end
         end
     end
+end
+
+local SCAN_BATCH_SIZE = 50
+
+-- Drains up to SCAN_BATCH_SIZE entries from the discovery queue, doing the actual tooltip
+-- read (the expensive part) for each. Called every idle tick from BuffMe.lua's OnUpdate
+-- throttle — cheap no-op when the queue is empty, so it costs nothing in the steady state.
+function BuffMe_ProcessScanQueue()
+    if #scanQueue == 0 then return false end
+
+    local knownInEG = {}
+    for _, egEntry in pairs(BuffMeCharDB.effectGroups) do
+        for normalName in pairs(egEntry.members) do
+            knownInEG[normalName] = true
+        end
+    end
+
+    local processed = 0
+    local matched = false
+    while processed < SCAN_BATCH_SIZE and #scanQueue > 0 do
+        local job = table.remove(scanQueue, 1)
+        scanQueueSeen[job.unit .. "\0" .. job.normalName] = nil
+        processed = processed + 1
+
+        if UnitExists(job.unit) and not knownInEG[job.normalName] then
+            -- Re-locate the buff's current index — it may have shifted or the aura may
+            -- have expired since it was enqueued; a stale index would read the wrong buff.
+            local i = 1
+            while true do
+                local buffName = UnitBuff(job.unit, i)
+                if not buffName then break end
+                if BuffMe_NormalizeName(buffName) == job.normalName then
+                    local sig, value = BuffMe_GetUnitBuffInfo(job.unit, i)
+                    if sig and sig ~= "" then
+                        local egEntry, matchedSig = BuffMe_FindEffectGroup(sig)
+                        if egEntry then
+                            BuffMe_RegisterInEffectGroup(matchedSig, egEntry.typeGroup, job.normalName, buffName, value)
+                            BuffMe_RegisterAuraInTypeGroup(buffName, egEntry.typeGroup)
+                            BuffMe_Debug("Effect group match (passive): \"" .. buffName ..
+                                "\" → typeGroup \"" .. egEntry.typeGroup .. "\" on " .. job.unit)
+                            matched = true
+                        end
+                    end
+                    break
+                end
+                i = i + 1
+            end
+        end
+    end
+
+    return matched
 end
 
 -- Return all spell entries that are currently castable: known, eligible, and off cooldown.

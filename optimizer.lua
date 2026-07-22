@@ -270,6 +270,17 @@ function BuffMe_GetNextCast()
                 end
             end
 
+            -- Player/party units never got the same "what did we scan" trace target did
+            -- (see the `unit == "target"` block above) -- this was a blind spot when
+            -- diagnosing a self/group-cast spell (e.g. a Ward) that kept getting
+            -- recommended for recast despite already being active; there was no way to
+            -- see which typeGroups the scan actually resolved to for "player" itself.
+            if unit == "player" then
+                local tgList = {}
+                for tg in pairs(coveredTG) do tgList[#tgList + 1] = tg end
+                BuffMe_Debug("GetNextCast: player coveredTG = { " .. table.concat(tgList, ", ") .. " }")
+            end
+
             for typeGroup in pairs(providers) do
                 local shouldSkip = false
 
@@ -316,6 +327,11 @@ function BuffMe_GetNextCast()
 
                 if not shouldSkip then
                     local priority = selectedEntry.priority or 5
+                    if unit == "player" then
+                        BuffMe_Debug("GetNextCast: typeGroup \"" .. typeGroup ..
+                            "\" NOT covered on player -- candidate " .. selectedEntry.name ..
+                            " (ID " .. tostring(selectedEntry.spellId) .. ", priority " .. priority .. ")")
+                    end
                     if priority > bestPriority then
                         bestPriority = priority
                         bestSpellId  = selectedEntry.spellId

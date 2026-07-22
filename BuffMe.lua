@@ -52,6 +52,66 @@ local pendingGroupCastGUIDs = {}  -- [spellName] = { [destGUID] = true, ... }; a
                                    -- distinct destinations of a single self-cast within the
                                    -- frame it lands, to detect "Greater"-style group-wide auras.
 
+-- Shared by SPELL_AURA_APPLIED and SPELL_AURA_REFRESH: a buff that's already active on the
+-- caster only ever refreshes, never re-applies, so a spell kept permanently topped up (e.g.
+-- a long-duration self-only ward) could go its whole life without a single APPLIED event —
+-- and with it, without ever running this redirect check.
+local function HandleSelfOnlyRedirect(destGUID, spellId, spellName, playerGUID)
+    if destGUID == playerGUID
+    and lastCastAttempt
+    and lastCastAttempt.unit ~= "player"
+    and lastCastAttempt.spellName == spellName then
+        local selfKey = lastCastAttempt.spellId or spellId
+        if selfKey and BuffMe_MarkSelfOnly(selfKey) then
+            BuffMe_Debug("Self-only detected: \"" .. spellName ..
+                "\" landed on caster despite targeting " .. lastCastAttempt.unit)
+        end
+    end
+end
+
+-- Same rationale as above, for group-cast detection: accumulate distinct destGUIDs per
+-- spell name from both APPLIED and REFRESH so a mixed batch (some destinations freshly
+-- applied, others already active and merely refreshed) still confirms group-cast.
+-- Excludes the player's own pet: a self-buff that splashes onto a summoned pet (e.g.
+-- Fetid Ward's "heals you and your minions" clause) lands on 2 distinct GUIDs from one
+-- cast just like a real party-wide aura would, but it's still a self-only spell as far as
+-- the optimizer's per-party-member coverage check is concerned — real party members never
+-- receive it, so marking it groupCast=true made GetNextCast treat their permanent "gap" as
+-- a reason to keep recasting it onto the player even while the player's own copy was active.
+-- Also requires the triggering cast attempt to have been self-targeted: group-cast means
+-- "cast once on yourself, applies to the whole party." A deliberately single-target spell
+-- (e.g. Razorice, aimed at one ally at a time and needing 5 separate casts to cover a full
+-- party) can also splash onto that one target's own minions, and several such casts fired
+-- in quick succession land in the same accumulation window — without this check they'd be
+-- misread as one party-wide cast, same false-positive shape as the pet-splash case above.
+local function AccumulateGroupCast(spellId, spellName, destGUID, playerGUID)
+    if not (spellId and spellName and destGUID) then return end
+    if UnitExists("pet") and destGUID == UnitGUID("pet") then return end
+    if not (lastCastAttempt and lastCastAttempt.unit == "player"
+        and lastCastAttempt.spellName == spellName) then
+        return
+    end
+    local gcSet = pendingGroupCastGUIDs[spellName]
+    if not gcSet then
+        gcSet = {}
+        pendingGroupCastGUIDs[spellName] = gcSet
+    end
+    gcSet[destGUID] = true
+    if gcSet[playerGUID] then
+        local distinctCount = 0
+        for _ in pairs(gcSet) do distinctCount = distinctCount + 1 end
+        if distinctCount >= 2 then
+            local gcEntry = BuffMeCharDB.spells[spellId]
+            if gcEntry and not gcEntry.groupCast then
+                BuffMe_MarkGroupCast(spellId)
+                BuffMe_Debug("Group-cast confirmed: \"" .. spellName ..
+                    "\" applied to " .. distinctCount ..
+                    " units from one self-cast")
+            end
+        end
+    end
+end
+
 -- Build a fresh snapshot of the player's current buffs without emitting diff messages.
 -- Called on login/reload so the first real UNIT_AURA doesn't report every existing buff.
 local function SnapshotPlayerBuffs()
@@ -171,6 +231,7 @@ local function ScheduleRescan()
 end
 
 function BuffMe_ForceRefresh()
+    lastRefreshTime = GetTime()
     RefreshUI()
 end
 
@@ -640,9 +701,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
             if sourceGUID == playerGUID and spellId and spellName then
                 BuffMe_Debug("Aura refreshed: \"" .. spellName .. "\" (ID " .. spellId ..
                     ") on " .. (destName or "?"))
+                HandleSelfOnlyRedirect(destGUID, spellId, spellName, playerGUID)
+                AccumulateGroupCast(spellId, spellName, destGUID, playerGUID)
                 lastCastAttempt = nil
                 pendingCast = nil  -- refresh is a valid cast outcome; suppress "no new buff" warning
-                ScheduleRescan()
+                -- Bypass the throttle: this is confirmation of the player's own deliberate
+                -- cast, so the next suggestion must be correct immediately, not up to
+                -- REFRESH_THROTTLE seconds later.
+                BuffMe_ForceRefresh()
             end
 
         elseif eventType == "SPELL_AURA_APPLIED" and auraType == "BUFF" then
@@ -689,27 +755,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         -- player plus at least one other unit for the same cast, it's confirmed
                         -- group-wide — mark it so the optimizer always casts it on "player"
                         -- regardless of which member's coverage gap triggered it.
-                        do
-                            local gcSet = pendingGroupCastGUIDs[spellName]
-                            if not gcSet then
-                                gcSet = {}
-                                pendingGroupCastGUIDs[spellName] = gcSet
-                            end
-                            gcSet[destGUID] = true
-                            if gcSet[playerGUID] then
-                                local distinctCount = 0
-                                for _ in pairs(gcSet) do distinctCount = distinctCount + 1 end
-                                if distinctCount >= 2 then
-                                    local gcEntry = BuffMeCharDB.spells[spellId]
-                                    if gcEntry and not gcEntry.groupCast then
-                                        BuffMe_MarkGroupCast(spellId)
-                                        BuffMe_Debug("Group-cast confirmed: \"" .. spellName ..
-                                            "\" applied to " .. distinctCount ..
-                                            " units from one self-cast")
-                                    end
-                                end
-                            end
-                        end
+                        AccumulateGroupCast(spellId, spellName, destGUID, playerGUID)
                         -- Capture the aura's tooltip sig for effect-group matching.
                         -- We use the live unit-buff tooltip (SetUnitBuff) as the sole
                         -- source so sigs are format-identical on both sides of comparisons.
@@ -792,19 +838,13 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         -- Self-only detection: buff landed on the caster despite being aimed at
                         -- someone else (e.g. "Boon of the Bear" — a toggle that only affects self).
                         -- Mark it so the optimizer never suggests casting it on party members.
-                        if destGUID == playerGUID
-                        and lastCastAttempt
-                        and lastCastAttempt.unit ~= "player"
-                        and lastCastAttempt.spellName == spellName then
-                            local selfKey = lastCastAttempt.spellId or spellId
-                            if BuffMe_MarkSelfOnly(selfKey) then
-                                BuffMe_Debug("Self-only detected: \"" .. spellName ..
-                                    "\" landed on caster despite targeting " .. lastCastAttempt.unit)
-                            end
-                        end
+                        HandleSelfOnlyRedirect(destGUID, spellId, spellName, playerGUID)
                         lastCastAttempt = nil
                         pendingCast = nil  -- CLEU handled it; cancel the UNIT_AURA fallback
-                        ScheduleRescan()
+                        -- Bypass the throttle: this is confirmation of the player's own
+                        -- deliberate cast, so the next suggestion must be correct
+                        -- immediately, not up to REFRESH_THROTTLE seconds later.
+                        BuffMe_ForceRefresh()
                         end  -- isFriendlyDest
                     end
                 end

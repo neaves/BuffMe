@@ -280,6 +280,20 @@ local CAST_AURA_EVENTS = {
     SPELL_DISPEL            = true, SPELL_SUMMON            = true,
 }
 
+-- Every CLEU eventType this addon ever acts on (CAST_AURA_EVENTS above, used only for
+-- the diagnostic dump, plus SPELL_CAST_FAILED, used for bounced-cast/ineligibility
+-- learning). CLEU fires for every combat log line visible to the client -- SWING_DAMAGE,
+-- SPELL_DAMAGE, SPELL_MISS, SPELL_PERIODIC_*, etc. -- from every combatant in the fight,
+-- ally and enemy alike. That volume scales directly with how many units are actively
+-- fighting (e.g. a necromancer's and knight's summoned minions all attacking at once),
+-- so bailing out on this cheap table lookup before unpacking the event or calling
+-- UnitGUID() matters: without it, every one of those irrelevant events still paid for a
+-- 12-value vararg destructure and a UnitGUID("player") call before being discarded.
+local RELEVANT_CLEU_EVENTS = { SPELL_CAST_FAILED = true }
+for eventType in pairs(CAST_AURA_EVENTS) do
+    RELEVANT_CLEU_EVENTS[eventType] = true
+end
+
 local function IsBouncedError(msg)
     if type(msg) ~= "string" then return false end
     local lower = msg:lower()
@@ -434,7 +448,12 @@ frame:SetScript("OnEvent", function(self, event, ...)
         if unit ~= "player" and unit ~= "target" and not unit:match("^party%d$") then
             return
         end
-        local gained, lost = {}, {}
+        -- Only allocated for "player": DiffPlayerBuffs() is the sole producer, and every
+        -- read of gained/lost below is itself guarded by `unit == "player"`. Avoiding the
+        -- {} {} allocation for "target"/partyN events matters because those fire constantly
+        -- during combat (e.g. a targeted unit's debuffs ticking) and would otherwise churn
+        -- the GC on every one for tables that are never used.
+        local gained, lost
         if unit == "player" then
             gained, lost = DiffPlayerBuffs()
         end
@@ -567,11 +586,20 @@ frame:SetScript("OnEvent", function(self, event, ...)
         inCombat = true
         BuffMe_Debug("Entered combat — button disabled")
         if BuffMe_SetCombatState then BuffMe_SetCombatState(true) end
+        -- The Buff Me button is combat-locked (BuffMe_PrepareCast refuses in combat), and
+        -- CLEU learning only ever fires from the player's own buff casts — so there's
+        -- nothing left for this event to do in combat. Unregistering it entirely avoids
+        -- paying any per-event cost (even the cheap eventType-lookup bail) for the whole
+        -- volume of combat log traffic, which spikes hard when several minions/pets are
+        -- all fighting at once. Tradeoff: a buff manually cast mid-combat (not via the
+        -- button) won't be learned/updated until it's cast again outside combat.
+        self:UnregisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 
     elseif event == "PLAYER_REGEN_ENABLED" then
         inCombat = false
         BuffMe_Debug("Left combat — button re-enabled")
         if BuffMe_SetCombatState then BuffMe_SetCombatState(false) end
+        self:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
         -- Catch-up: effect-group discovery was skipped for every UNIT_AURA / roster change
         -- during combat. One full-party scan here recovers anything learnable that appeared
         -- on the party mid-fight, then the deferred UI rescan flushes on the next frame.
@@ -678,6 +706,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
         end
 
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
+        -- Cheap bail before unpacking anything else: the overwhelming majority of CLEU
+        -- volume in combat (damage, misses, periodic ticks) is never acted on below.
+        if not RELEVANT_CLEU_EVENTS[(select(2, ...))] then return end
+
         local timestamp, eventType, sourceGUID, sourceName, sourceFlags,
               destGUID, destName, destFlags,
               spellId, spellName, spellSchool, auraType = ...
@@ -707,8 +739,15 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 pendingCast = nil  -- refresh is a valid cast outcome; suppress "no new buff" warning
                 -- Bypass the throttle: this is confirmation of the player's own deliberate
                 -- cast, so the next suggestion must be correct immediately, not up to
-                -- REFRESH_THROTTLE seconds later.
-                BuffMe_ForceRefresh()
+                -- REFRESH_THROTTLE seconds later. But only when the destination is a unit we
+                -- actually track coverage for (player/party/target) — see the matching gate in
+                -- the APPLIED branch below. Otherwise this is e.g. a still-alive summoned pet's
+                -- buff refreshing (recasting "Animate: Skeletal Archer" while some archers from
+                -- the last cast are still up), and a full optimizer/UI pass for that is wasted
+                -- work that piles up fast when several such pets refresh in the same instant.
+                if GUIDToUnit(destGUID) then
+                    BuffMe_ForceRefresh()
+                end
             end
 
         elseif eventType == "SPELL_AURA_APPLIED" and auraType == "BUFF" then
@@ -747,6 +786,20 @@ frame:SetScript("OnEvent", function(self, event, ...)
                                 end
                             end
                         else
+                        -- Further require destGUID to resolve to a unit BuffMe actually tracks
+                        -- coverage for (player/party/target). The friendly-reaction-flag check
+                        -- above also passes for the caster's own summoned pets/minions — e.g.
+                        -- "Animate: Skeletal Archer" applies a friendly buff to each of 5 new
+                        -- archers in the same instant. Treating those as real buff-casts ran the
+                        -- full registration pipeline (including BuffMe_ForceRefresh's full
+                        -- optimizer/UI pass) once per minion, all at once — a visible frame-time
+                        -- spike right when a summon spell enters combat. This isn't an enemy-only
+                        -- spell (so don't mark ineligible below), just not a destination we track.
+                        local destUnit = GUIDToUnit(destGUID)
+                        if not destUnit then
+                            BuffMe_Debug("Skipped registration (non-tracked destination): \"" .. spellName ..
+                                "\" (ID " .. spellId .. ") → " .. (destName or "?"))
+                        else
                         BuffMe_RegisterSpell(spellId, spellName, spellName)
                         -- Group-cast detection ("Greater" auras): a single self-targeted cast
                         -- that applies to the whole party/raid fires one SPELL_AURA_APPLIED per
@@ -759,8 +812,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         -- Capture the aura's tooltip sig for effect-group matching.
                         -- We use the live unit-buff tooltip (SetUnitBuff) as the sole
                         -- source so sigs are format-identical on both sides of comparisons.
-                        local destUnit = GUIDToUnit(destGUID)
-                        if destUnit then
+                        do
                             local entry = BuffMeCharDB.spells[spellId]
                             if entry then BuffMe_CaptureAuraTooltip(destUnit, entry) end
                         end
@@ -845,6 +897,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         -- deliberate cast, so the next suggestion must be correct
                         -- immediately, not up to REFRESH_THROTTLE seconds later.
                         BuffMe_ForceRefresh()
+                        end  -- destUnit
                         end  -- isFriendlyDest
                     end
                 end

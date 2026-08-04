@@ -111,3 +111,20 @@ Per character (BuffMeDB.chars[charName], aliased to BuffMeCharDB):
 - **DB pruning**: `BuffMeCharDB.spells` never prunes entries for spells no longer in the player's
   book (spec/talent changes). Low priority — `GetKnownBuffSpells` already filters them from
   candidate selection at read time.
+- **A typeGroup spanning multiple different tooltip sigs is not automatically corruption** —
+  correction to a false alarm from the 2026-08-04 `SpellDB.lua` promotion. Cross-referencing
+  `Tools/*.json` exports, "Grove Instinct"/"Primal Instinct" and "Bone Ward"/"Glacial Ward"/
+  "Fetid Ward" were initially (wrongly) treated as keyword-overlap conflation and split into
+  separate typeGroups. Both are actually genuine single mutually-exclusive slots (same shape as
+  the pre-existing `boonofthebear` stance family) — user-confirmed, and the Ward case
+  independently confirmed via a real CLEU-observed same-instant replacement in one character's
+  diagnosticLog. Reverted; both are single typeGroups again in `SpellDB.lua`. See
+  [[feedback-keyword-overlap-stopwords]] for the full account. Before ever suspecting sig-spanning
+  conflation again: check the diagnosticLog for a genuine CLEU-confirmed swap first, and ask
+  rather than assume.
+- **Full multi-class spell promotion not yet done.** The 2026-08-04 `SpellDB.lua` pass only added
+  Primalist "Greater X" castable spells (the ones that started this investigation) plus
+  effectGroup/auraToTypeGroup entries for recognizing external buffs. The `Tools/*.json` exports
+  also contain full spellbooks for the account's other 7 characters (Warrior/Paladin/Necromancer/
+  Druid-hybrid custom classes) with real castable spells never promoted as `spells` entries —
+  available for a future promotion pass if useful.

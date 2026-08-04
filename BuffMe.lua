@@ -30,12 +30,11 @@ function BuffMe_IsTrivialTarget(unit)
     return guid ~= nil and trivialTargets[guid] or false
 end
 
--- Resolve a unit GUID to a unit token by checking player + current party + target.
+-- Resolve a unit GUID to a unit token by checking every tracked unit (raid-wide when in a
+-- raid, else player + party) plus target.
 local function GUIDToUnit(guid)
     if not guid then return nil end
-    if UnitGUID("player") == guid then return "player" end
-    for i = 1, GetNumPartyMembers() do
-        local u = "party" .. i
+    for _, u in ipairs(BuffMe_GetTrackedUnits()) do
         if UnitGUID(u) == guid then return u end
     end
     if UnitExists("target") and UnitGUID("target") == guid then return "target" end
@@ -49,8 +48,10 @@ local pendingSelfOnlyCheck = nil  -- { spellId, spellName } — REMOVED-on-playe
                                    -- tell true self-only toggle apart from a global-singleton
                                    -- relocation (e.g. "Bless") that legitimately lands on the target.
 local pendingGroupCastGUIDs = {}  -- [spellName] = { [destGUID] = true, ... }; accumulates
-                                   -- distinct destinations of a single self-cast within the
-                                   -- frame it lands, to detect "Greater"-style group-wide auras.
+                                   -- distinct destinations of a single self-cast within
+                                   -- GROUP_CAST_WINDOW seconds, to detect "Greater"-style
+                                   -- group-wide auras (see GROUP_CAST_WINDOW below).
+local pendingGroupCastStart = {}  -- [spellName] = GetTime() when its gcSet was first created
 
 -- Shared by SPELL_AURA_APPLIED and SPELL_AURA_REFRESH: a buff that's already active on the
 -- caster only ever refreshes, never re-applies, so a spell kept permanently topped up (e.g.
@@ -78,23 +79,33 @@ end
 -- the optimizer's per-party-member coverage check is concerned — real party members never
 -- receive it, so marking it groupCast=true made GetNextCast treat their permanent "gap" as
 -- a reason to keep recasting it onto the player even while the player's own copy was active.
--- Also requires the triggering cast attempt to have been self-targeted: group-cast means
--- "cast once on yourself, applies to the whole party." A deliberately single-target spell
--- (e.g. Razorice, aimed at one ally at a time and needing 5 separate casts to cover a full
--- party) can also splash onto that one target's own minions, and several such casts fired
--- in quick succession land in the same accumulation window — without this check they'd be
--- misread as one party-wide cast, same false-positive shape as the pet-splash case above.
+-- Does NOT require the triggering cast to have been self-targeted: the very first cast of
+-- a not-yet-known "Greater X" spell gets aimed at whichever member has the gap (the optimizer
+-- doesn't know yet that it's group-cast), so gating on unit=="player" here would mean it can
+-- never be detected from that cast. A deliberately single-target spell cast repeatedly at
+-- different people in quick succession (e.g. Razorice, needing 5 separate casts to cover a
+-- full party) is still told apart correctly: pendingGroupCastGUIDs entries expire after
+-- GROUP_CAST_WINDOW seconds (see below), and separate casts each need their own GCD/cast time.
+--
+-- GROUP_CAST_WINDOW: confirmed via a real 16-person raid (2026-08-03) that CLEU delivers a
+-- single raid-wide splash cast's APPLIED events spread across ~1-2 real seconds, not one
+-- frame — a real cast on Misulah/Esoteria/Cryin/... landed at 23:04:33 and the last of 10
+-- recipients arrived at 23:04:34. The original per-frame wipe cleared the accumulator between
+-- almost every one of those events, so groupCast never got confirmed for any spell in that
+-- raid despite it visibly applying to everyone. A multi-second window is required at raid
+-- scale; OnUpdate expires entries older than this instead of wiping unconditionally.
+local GROUP_CAST_WINDOW = 3
 local function AccumulateGroupCast(spellId, spellName, destGUID, playerGUID)
     if not (spellId and spellName and destGUID) then return end
     if UnitExists("pet") and destGUID == UnitGUID("pet") then return end
-    if not (lastCastAttempt and lastCastAttempt.unit == "player"
-        and lastCastAttempt.spellName == spellName) then
+    if not (lastCastAttempt and lastCastAttempt.spellName == spellName) then
         return
     end
     local gcSet = pendingGroupCastGUIDs[spellName]
     if not gcSet then
         gcSet = {}
         pendingGroupCastGUIDs[spellName] = gcSet
+        pendingGroupCastStart[spellName] = GetTime()
     end
     gcSet[destGUID] = true
     if gcSet[playerGUID] then
@@ -155,6 +166,97 @@ local function DiffPlayerBuffs()
     return gained, lost
 end
 
+-- ── Passive raid-wide "displaces" detection (Candidate Merges) ────────────────────────────
+-- Independent of DiffPlayerBuffs above (which drives trusted, auto-merged learning for the
+-- player's own confirmed casts). This tracks every raid/party member's buff *names* (cheap,
+-- no tooltip reads) so a clean 1-for-1 swap can be spotted on ANY unit, then opportunistically
+-- caches the tooltip sig of anything newly gained so that if it's later the "lost" side of a
+-- future swap, we still have its sig to compare — a buff's tooltip can't be read anymore once
+-- it's gone, so the sig has to be captured while it was still active.
+local unitBuffCache    = {}  -- [unit] = { [buffName] = true }
+local unitBuffSigCache = {}  -- [unit] = { [normalName] = sig }
+
+-- Locate a named buff's current index on a unit, or nil if not present.
+local function FindBuffIndex(unit, buffName)
+    local i = 1
+    while true do
+        local name = UnitBuff(unit, i)
+        if not name then return nil end
+        if name == buffName then return i end
+        i = i + 1
+    end
+end
+
+-- Snapshot only units not already cached (new joiners), so an existing member's cache
+-- (and its accumulated sig cache) survives an unrelated roster change.
+local function SnapshotNewTrackedUnits()
+    for _, u in ipairs(BuffMe_GetTrackedUnits()) do
+        if UnitExists(u) and not unitBuffCache[u] then
+            local cache = {}
+            local i = 1
+            while true do
+                local name = UnitBuff(u, i)
+                if not name then break end
+                cache[name] = true
+                i = i + 1
+            end
+            unitBuffCache[u] = cache
+        end
+    end
+end
+
+-- Diff one unit's buffs against its cache; returns gained/lost name lists. Also opportunistically
+-- caches a tooltip sig for each newly-gained buff (cheap: bounded to the delta, not the whole list).
+local function DiffUnitBuffs(unit)
+    local cache = unitBuffCache[unit] or {}
+    local current, gained, lost = {}, {}, {}
+    local i = 1
+    while true do
+        local name = UnitBuff(unit, i)
+        if not name then break end
+        current[name] = true
+        if not cache[name] then table.insert(gained, name) end
+        i = i + 1
+    end
+    for name in pairs(cache) do
+        if not current[name] then table.insert(lost, name) end
+    end
+    unitBuffCache[unit] = current
+
+    for _, name in ipairs(gained) do
+        local normalName = BuffMe_NormalizeName(name)
+        unitBuffSigCache[unit] = unitBuffSigCache[unit] or {}
+        if not unitBuffSigCache[unit][normalName] then
+            local idx = FindBuffIndex(unit, name)
+            if idx then
+                local sig = BuffMe_GetUnitBuffInfo(unit, idx)
+                if sig and sig ~= "" then
+                    unitBuffSigCache[unit][normalName] = sig
+                end
+            end
+        end
+    end
+
+    return gained, lost
+end
+
+-- Non-combat only (matches the existing passive effect-group scanner's throttling — the
+-- point of this feature is catching end-of-raid buffing, not adding per-event cost mid-fight).
+-- A clean 1-for-1 swap whose old and new tooltip sigs match is strong evidence the two buffs
+-- displace each other; queued for user review rather than auto-merged (see BuffMe_RecordCandidatePair).
+local function CheckDisplacedBuffPair(unit)
+    if inCombat or not BuffMe_LearnModeEnabled() then return end
+    local gained, lost = DiffUnitBuffs(unit)
+    if #gained == 1 and #lost == 1 and gained[1] ~= lost[1] then
+        local gName, lName = gained[1], lost[1]
+        local gSig = unitBuffSigCache[unit] and unitBuffSigCache[unit][BuffMe_NormalizeName(gName)]
+        local lSig = unitBuffSigCache[unit] and unitBuffSigCache[unit][BuffMe_NormalizeName(lName)]
+        if gSig and lSig and BuffMe_SigsMatch(gSig, lSig) then
+            BuffMe_RecordCandidatePair(lName, gName, unit)
+        end
+    end
+end
+
 -- Scan the spellbook to find a spell ID by name; fallback when UNIT_SPELLCAST_SUCCEEDED
 -- doesn't carry the ID (varies by server/emulator).
 local function FindSpellIdInBook(spellName)
@@ -173,6 +275,7 @@ end
 local frame = CreateFrame("Frame", "BuffMeFrame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+frame:RegisterEvent("RAID_ROSTER_UPDATE")
 frame:RegisterEvent("UNIT_AURA")
 frame:RegisterEvent("PLAYER_REGEN_DISABLED")
 frame:RegisterEvent("PLAYER_REGEN_ENABLED")
@@ -206,7 +309,17 @@ local REFRESH_THROTTLE = 2
 local lastRefreshTime = 0
 frame:SetScript("OnUpdate", function(self, elapsed)
     if next(pendingRemovals) then wipe(pendingRemovals) end  -- clear unmatched CLEU removals
-    if next(pendingGroupCastGUIDs) then wipe(pendingGroupCastGUIDs) end  -- clear group-cast batch
+    -- Expire group-cast accumulation batches older than GROUP_CAST_WINDOW (not unconditionally
+    -- every frame — a raid-wide splash cast's APPLIED events can spread across several seconds).
+    if next(pendingGroupCastGUIDs) then
+        local now = GetTime()
+        for spellName, startTime in pairs(pendingGroupCastStart) do
+            if now - startTime > GROUP_CAST_WINDOW then
+                pendingGroupCastGUIDs[spellName] = nil
+                pendingGroupCastStart[spellName]  = nil
+            end
+        end
+    end
     recentlyCastName = nil  -- proc guard: reset each frame after CLEU has had a chance to fire
     if not inCombat then
         local now = GetTime()
@@ -423,15 +536,17 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         SnapshotPlayerBuffs()
+        SnapshotNewTrackedUnits()
         BuffMe_ScanPartyForEffectGroups(nil)
         ScheduleRescan()
 
-    elseif event == "PARTY_MEMBERS_CHANGED" then
-        BuffMe_Debug("Party changed (" .. GetNumPartyMembers() .. " member(s))")
+    elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
+        BuffMe_Debug("Roster changed (" .. #BuffMe_GetTrackedUnits() .. " tracked unit(s))")
         -- Roster changed — drop the session-only trivial-target set rather than risk
         -- staleness (a departed member's GUID is harmless to keep, but simplest to reset).
         trivialTargets = {}
-        -- Full-party tooltip scan — defer to the PLAYER_REGEN_ENABLED catch-up in combat.
+        SnapshotNewTrackedUnits()
+        -- Full roster tooltip scan — defer to the PLAYER_REGEN_ENABLED catch-up in combat.
         if not inCombat then
             BuffMe_ScanPartyForEffectGroups(nil)
         end
@@ -441,13 +556,22 @@ frame:SetScript("OnEvent", function(self, event, ...)
         local unit = ...
         -- UNIT_AURA is registered without RegisterUnitEvent, so it fires for every unit
         -- token the client is tracking auras for — nameplates, nearby mobs, other players'
-        -- pets, etc. — not just our party. In a dungeon that's a constant stream of
-        -- irrelevant events. Only player/party/target auras can ever affect buff coverage,
-        -- so bail immediately for anything else before doing any diffing, tooltip scanning,
-        -- or triggering a rescan.
-        if unit ~= "player" and unit ~= "target" and not unit:match("^party%d$") then
+        -- pets, etc. — not just our group. In a dungeon/raid that's a constant stream of
+        -- irrelevant events. Only player/party/raid/target auras can ever affect buff
+        -- coverage, so bail immediately for anything else before doing any diffing,
+        -- tooltip scanning, or triggering a rescan.
+        if unit ~= "player" and unit ~= "target"
+        and not unit:match("^party%d$") and not unit:match("^raid%d%d?$") then
             return
         end
+
+        -- Raid-wide passive "displaces" detection — independent of everything below,
+        -- runs for every tracked unit including player. "target" excluded: it isn't a
+        -- stable roster member, so there's no meaningful buff-name cache to diff against.
+        if unit ~= "target" then
+            CheckDisplacedBuffPair(unit)
+        end
+
         -- Only allocated for "player": DiffPlayerBuffs() is the sole producer, and every
         -- read of gained/lost below is itself guarded by `unit == "player"`. Avoiding the
         -- {} {} allocation for "target"/partyN events matters because those fire constantly

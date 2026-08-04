@@ -155,14 +155,20 @@ end
 --   Spells whose tooltipSig appears in coveredSigs are skipped — their effect is already
 --   provided by a stronger external source. Other spells in the same typeGroup (with
 --   different sigs) remain valid so the optimizer can still fill a useful buff slot.
--- Falls back to highest-priority castable spell whose effect isn't already covered.
+-- A confirmed group-cast sibling ("Greater X") always wins when available: one self-cast
+-- covers every candidate unit, which is strictly more efficient than casting a single-target
+-- sibling once per person — even over a recorded per-target last-cast preference, which
+-- could otherwise pin the optimizer onto the single-target version indefinitely.
+-- Otherwise falls back to the highest-priority castable spell whose effect isn't covered.
 local function SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
     local targetName   = UnitName(unit)
     local preferredKey = BuffMe_GetPreferredSpellKey(typeGroup, targetName)
 
-    local preferred      = nil
-    local fallback       = nil
-    local fallbackPriority = -1
+    local preferred        = nil
+    local groupCastPick    = nil
+    local groupCastPriority = -1
+    local fallback          = nil
+    local fallbackPriority  = -1
 
     for _, entry in ipairs(knownSpells) do
         -- Self-only spells (toggleable auras that only affect the caster) are never
@@ -186,12 +192,16 @@ local function SelectSpellForGroup(typeGroup, unit, knownSpells, coveredSigs)
                         fallbackPriority = p
                         fallback         = entry
                     end
+                    if entry.groupCast and p > groupCastPriority then
+                        groupCastPriority = p
+                        groupCastPick     = entry
+                    end
                 end
             end
         end
     end
 
-    return preferred or fallback
+    return groupCastPick or preferred or fallback
 end
 
 -- Determine which playerGroups are already active on the caster

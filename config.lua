@@ -364,6 +364,52 @@ gpScroll:SetScrollChild(gpContent)
 
 local GetGpRow, gpRowPool = MakeRowPool(gpContent, 16)
 
+-- Header row pool: editable group-name field + OK button, with a tooltip
+-- showing sample spells so the user knows what they're renaming.
+local function MakeGroupHeaderRowPool(content, rowHeight)
+    local pool = {}
+    return function(i)
+        if not pool[i] then
+            local f = CreateFrame("Frame", nil, content)
+            f:SetHeight(rowHeight)
+
+            local edit = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
+            edit:SetSize(250, 16)
+            edit:SetPoint("LEFT", 4, 0)
+            edit:SetAutoFocus(false)
+            edit:SetMaxLetters(40)
+            f.edit = edit
+
+            local okBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+            okBtn:SetSize(36, 18)
+            okBtn:SetText("OK")
+            okBtn:SetPoint("LEFT", edit, "RIGHT", 6, 0)
+            f.okBtn = okBtn
+
+            local function Commit()
+                edit:ClearFocus()
+                if f.onCommit then f.onCommit(edit:GetText()) end
+            end
+            edit:SetScript("OnEnterPressed", Commit)
+            okBtn:SetScript("OnClick", Commit)
+
+            edit:SetScript("OnEnter", function(self)
+                if not f.tooltipText then return end
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText(f.tooltipTitle or "", 1, 0.82, 0)
+                GameTooltip:AddLine(f.tooltipText, 1, 1, 1, true)
+                GameTooltip:Show()
+            end)
+            edit:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+            pool[i] = f
+        end
+        return pool[i]
+    end, pool
+end
+
+local GetGpHeaderRow, gpHeaderRowPool = MakeGroupHeaderRowPool(gpContent, 20)
+
 local function RefreshGroupsPanel()
     if not BuffMeCharDB or not BuffMeCharDB.typeGroupMembers then return end
 
@@ -384,10 +430,11 @@ local function RefreshGroupsPanel()
     end
     table.sort(groups, function(a, b) return a.tg < b.tg end)
 
-    local rowIdx   = 0
-    local y        = 0
-    local compact  = BuffMeDB and BuffMeDB.compactSpellGroups
-    local skipped  = 0
+    local rowIdx    = 0
+    local headerIdx = 0
+    local y         = 0
+    local compact   = BuffMeDB and BuffMeDB.compactSpellGroups
+    local skipped   = 0
 
     for _, grp in ipairs(groups) do
         local memberCount = #grp.spells
@@ -395,16 +442,43 @@ local function RefreshGroupsPanel()
             skipped = skipped + 1
             -- fall through: do not emit rows for this group
         else
-        -- Group header row
-        rowIdx = rowIdx + 1
-        local row = GetGpRow(rowIdx)
-        row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", 0, -y)
-        row:SetWidth(390)
-        row:Show()
-        row.text:SetText(grp.tg .. "  (" .. memberCount .. " spell" .. (memberCount ~= 1 and "s" or "") .. ")")
-        row.text:SetTextColor(1, 0.82, 0)
-        y = y + 17
+        -- Group header row: editable name field + OK button
+        headerIdx = headerIdx + 1
+        local hrow = GetGpHeaderRow(headerIdx)
+        hrow:ClearAllPoints()
+        hrow:SetPoint("TOPLEFT", 0, -y)
+        hrow:SetWidth(390)
+        hrow:Show()
+
+        local displayName = BuffMe_GetGroupDisplayName(grp.tg)
+        hrow.edit:SetText(displayName)
+        if not hrow.countText then
+            hrow.countText = hrow:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+            hrow.countText:SetPoint("LEFT", hrow.okBtn, "RIGHT", 8, 0)
+        end
+        hrow.countText:SetText("(" .. memberCount .. " spell" .. (memberCount ~= 1 and "s" or "") .. ")")
+
+        -- Tooltip: sample spells that belong to this group, so renaming is informed
+        local sampleNames = {}
+        for i2, sp in ipairs(grp.spells) do
+            if i2 > 5 then table.insert(sampleNames, "..."); break end
+            table.insert(sampleNames, sp.name)
+        end
+        hrow.tooltipTitle = displayName
+        hrow.tooltipText  = "Contains: " .. table.concat(sampleNames, ", ")
+
+        hrow.onCommit = function(newText)
+            newText = newText and newText:match("^%s*(.-)%s*$") or ""
+            if not BuffMeDB then return end
+            BuffMeDB.typeGroupDisplayNames = BuffMeDB.typeGroupDisplayNames or {}
+            if newText == "" or newText == grp.tg then
+                BuffMeDB.typeGroupDisplayNames[grp.tg] = nil
+            else
+                BuffMeDB.typeGroupDisplayNames[grp.tg] = newText
+            end
+            RefreshGroupsPanel()
+        end
+        y = y + 22
 
         -- One row per spell in this group
         for _, sp in ipairs(grp.spells) do
@@ -456,6 +530,9 @@ local function RefreshGroupsPanel()
     -- Hide rows beyond what we used this pass
     for i = rowIdx + 1, #gpRowPool do
         gpRowPool[i]:Hide()
+    end
+    for i = headerIdx + 1, #gpHeaderRowPool do
+        gpHeaderRowPool[i]:Hide()
     end
 
     gpContent:SetHeight(math.max(y, 1))
@@ -607,6 +684,94 @@ ignorePanel:SetScript("OnShow", function()
     ipFeedback:SetText("")
     RefreshIgnorePanel()
 end)
+-- ── CANDIDATE MERGES sub-panel ──────────────────────────────────────────────────
+
+local cmPanel = CreateFrame("Frame", "BuffMeCandidateMergesPanel")
+cmPanel.name   = "Candidate Merges"
+cmPanel.parent = "Buff Me"
+
+local cmTitle = cmPanel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+cmTitle:SetPoint("TOPLEFT", 16, -16)
+cmTitle:SetText("Candidate Merges")
+
+local cmDesc = cmPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+cmDesc:SetPoint("TOPLEFT", cmTitle, "BOTTOMLEFT", 0, -6)
+cmDesc:SetText("Detected passively: one buff disappeared the instant another with a matching " ..
+    "tooltip appeared on the same person — likely the same effect. Accept to treat them as " ..
+    "interchangeable, or Reject to dismiss permanently.")
+cmDesc:SetWidth(400)
+cmDesc:SetJustifyH("LEFT")
+
+local cmScroll = CreateFrame("ScrollFrame", "BuffMeCandidateMergesScroll", cmPanel, "UIPanelScrollFrameTemplate")
+cmScroll:SetPoint("TOPLEFT", cmDesc, "BOTTOMLEFT", 0, -10)
+cmScroll:SetPoint("BOTTOMRIGHT", cmPanel, "BOTTOMRIGHT", -28, 8)
+
+local cmContent = CreateFrame("Frame", "BuffMeCandidateMergesContent", cmScroll)
+cmContent:SetWidth(390)
+cmContent:SetHeight(1)
+cmScroll:SetScrollChild(cmContent)
+
+local cmRowPool = {}
+local function GetCmRow(i)
+    if not cmRowPool[i] then
+        local f = CreateFrame("Frame", nil, cmContent)
+        f:SetHeight(34)
+        f.text = f:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        f.text:SetPoint("TOPLEFT", 2, 0)
+        f.text:SetPoint("RIGHT", 0, 0)
+        f.text:SetJustifyH("LEFT")
+
+        f.acceptBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.acceptBtn:SetSize(70, 20)
+        f.acceptBtn:SetPoint("TOPLEFT", f.text, "BOTTOMLEFT", 0, -2)
+        f.acceptBtn:SetText("Accept")
+
+        f.rejectBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.rejectBtn:SetSize(70, 20)
+        f.rejectBtn:SetPoint("LEFT", f.acceptBtn, "RIGHT", 6, 0)
+        f.rejectBtn:SetText("Reject")
+
+        cmRowPool[i] = f
+    end
+    return cmRowPool[i]
+end
+
+local function RefreshCandidateMergesPanel()
+    if not BuffMeCharDB or not BuffMeCharDB.candidatePairs then return end
+
+    local pairs_ = BuffMeCharDB.candidatePairs
+    local y = 0
+    for i, p in ipairs(pairs_) do
+        local row = GetCmRow(i)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -y)
+        row:SetWidth(390)
+        row:Show()
+        row.text:SetText("\"" .. p.nameA .. "\"  <->  \"" .. p.nameB .. "\"  (seen " ..
+            (p.seenCount or 1) .. "x, last on " .. (p.unit or "?") .. ")")
+        row.text:SetTextColor(0.9, 0.9, 0.9)
+
+        local key = p.key
+        row.acceptBtn:SetScript("OnClick", function()
+            BuffMe_AcceptCandidatePair(key)
+            RefreshCandidateMergesPanel()
+        end)
+        row.rejectBtn:SetScript("OnClick", function()
+            BuffMe_RejectCandidatePair(key)
+            RefreshCandidateMergesPanel()
+        end)
+
+        y = y + 38
+    end
+
+    for i = #pairs_ + 1, #cmRowPool do
+        cmRowPool[i]:Hide()
+    end
+
+    cmContent:SetHeight(math.max(y, 1))
+end
+
+cmPanel:SetScript("OnShow", RefreshCandidateMergesPanel)
 -- ── DIAGNOSTICS sub-panel ────────────────────────────────────────────────────
 
 local diagPanel = CreateFrame("Frame", "BuffMeDiagnosticsPanel")
@@ -881,6 +1046,7 @@ egPanel:SetScript("OnShow", function()
     RefreshEffectGroupsPanel()
 end)
 InterfaceOptions_AddCategory(ignorePanel)
+InterfaceOptions_AddCategory(cmPanel)
 InterfaceOptions_AddCategory(groupsPanel)
 InterfaceOptions_AddCategory(egPanel)
 InterfaceOptions_AddCategory(diagPanel)

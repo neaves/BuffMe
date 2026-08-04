@@ -226,9 +226,18 @@ end
 -- "of" but are unrelated effects). A pure length cutoff was tried first but it also
 -- discarded short, distinctive family words like "Vow" (Vow of Grace/Light/Radiance),
 -- which prevented those mutually-exclusive spells from ever being recognized as related.
+-- "greater"/"lesser" are magnitude prefixes reused across dozens of unrelated buff
+-- families on this server (Greater Essence of Nature, Greater Primal Instinct, Greater
+-- Rite of Power, ...) — confirmed in a real raid (2026-08-03) that treating "greater" as
+-- a meaningful keyword caused "Greater Whispers of N'zoth" to pre-group into the
+-- "essenceofnature" typeGroup (its only shared word with "Essence of Nature" was
+-- "greater"), and separately caused a same-frame buff-bar diff to merge "Greater Rite of
+-- Power" with "Greater Primal Instinct" — two completely unrelated effects sharing
+-- nothing else in their names.
 local NAME_STOPWORDS = {
     ["of"] = true, ["the"] = true, ["and"] = true, ["for"] = true,
     ["you"] = true, ["your"] = true, ["are"] = true, ["now"] = true,
+    ["greater"] = true, ["lesser"] = true,
 }
 
 -- Extract meaningful keywords (2+ letters, minus filler words) from a spell/buff name
@@ -346,6 +355,9 @@ function BuffMe_InitDB()
     -- Learn Mode defaults ON until SpellDB.lua's official baseline is built out enough
     -- that most players never need live discovery at all. See BuffMe_LearnModeEnabled.
     if BuffMeDB.learnMode           == nil then BuffMeDB.learnMode           = true  end
+    -- [typeGroup] = user-chosen display name; overlays the auto-generated typeGroup
+    -- key in the UI only (matching/learning logic keeps using the real key).
+    BuffMeDB.typeGroupDisplayNames = BuffMeDB.typeGroupDisplayNames or {}
 
     -- Per-character spell learning data, stored inside BuffMeDB keyed by character name.
     -- Ascension's /reload only flushes SavedVariables (BuffMeDB), not
@@ -393,6 +405,14 @@ function BuffMe_InitDB()
     -- instance anywhere, e.g. "Bless"). The optimizer treats these typeGroups as
     -- covered party-wide once any unit has them, instead of per-unit.
     BuffMeCharDB.globalTypeGroups = BuffMeCharDB.globalTypeGroups or {}
+    -- Unconfirmed "these two buffs displace each other" pairs, detected passively when one
+    -- buff disappears the same instant another with a matching tooltip appears on the same
+    -- unit. Held for user review (Candidate Merges panel) rather than auto-merged, since the
+    -- units involved aren't the player's own confirmed casts.
+    -- { key, nameA, nameB, unit, firstSeen, seenCount }
+    BuffMeCharDB.candidatePairs = BuffMeCharDB.candidatePairs or {}
+    -- [pairKey] = true; pairs the user explicitly rejected, never re-suggested
+    BuffMeCharDB.rejectedPairs  = BuffMeCharDB.rejectedPairs  or {}
     -- One-time migration: sigs are now sourced exclusively from live aura tooltips
     -- (SetUnitBuff) rather than spellbook tooltips (SetSpell). Old spellbook-sourced
     -- sigs have mana-cost and cast-time lines that aura tooltips don't, so they can
@@ -408,7 +428,102 @@ function BuffMe_InitDB()
         BuffMeCharDB.auraSigV2 = true
     end
 
+    -- One-time repair (2026-08-04): a real 16-person raid corrupted the "essenceofnature"
+    -- typeGroup via two independent bugs, both now fixed at the source but already baked
+    -- into saved data. Confirmed via diagnosticLog:
+    --   1) A CLEU-less pendingCast resolution mis-attributed an EXTERNAL buff landing on the
+    --      player ("Greater Whispers of N'zoth", cast by other raid members) as the aura
+    --      produced by the player's own "Greater Grove Instinct" cast, because both changes
+    --      landed in the same UNIT_AURA diff. The synthetic "__Greater Grove Instinct" entry's
+    --      auraName is factually wrong — removed so it re-learns cleanly from a clean cast.
+    --   2) "greater" was treated as a meaningful keyword (see NAME_STOPWORDS above), so
+    --      "Greater Primal Instinct" got pre-grouped into "essenceofnature" via "Greater
+    --      Essence of Nature" alone. General repair: re-derive every known spell's typeGroup
+    --      from its own captured tooltipSig (authoritative, generalized tooltip matching)
+    --      rather than trusting a possibly keyword-corrupted auraToTypeGroup assignment.
+    if not BuffMeCharDB.greaterKeywordRepairV1 then
+        local badKey   = "__Greater Grove Instinct"
+        local badEntry = BuffMeCharDB.spells[badKey]
+        if badEntry and badEntry.auraName == "Greater Whispers of N'zoth" then
+            local normalAura = BuffMe_NormalizeName(badEntry.auraName)
+            local tg = BuffMeCharDB.auraToTypeGroup[normalAura]
+            if tg then
+                local members = BuffMeCharDB.typeGroupMembers[tg]
+                if members then
+                    for i, m in ipairs(members) do
+                        if m == normalAura then table.remove(members, i); break end
+                    end
+                end
+                BuffMeCharDB.auraToTypeGroup[normalAura] = nil
+            end
+            if badEntry.tooltipSig then
+                local eg = BuffMeCharDB.effectGroups[badEntry.tooltipSig]
+                if eg then
+                    eg.members[normalAura] = nil
+                    if not next(eg.members) then
+                        BuffMeCharDB.effectGroups[badEntry.tooltipSig] = nil
+                    end
+                end
+            end
+            BuffMeCharDB.nameToKey[badEntry.name] = nil
+            BuffMeCharDB.auraDisplayNames[normalAura] = nil
+            BuffMeCharDB.spells[badKey] = nil
+            BuffMe_Debug("Repair: removed mis-registered \"" .. badKey ..
+                "\" (auraName was actually another player's buff)")
+        end
+
+        for _, entry in pairs(BuffMeCharDB.spells) do
+            if entry.tooltipSig and entry.tooltipSig ~= "" then
+                local egEntry = BuffMe_FindEffectGroup(entry.tooltipSig)
+                if egEntry then
+                    local normalAura = BuffMe_NormalizeName(entry.auraName)
+                    local oldTG = BuffMeCharDB.auraToTypeGroup[normalAura]
+                    local newTG = egEntry.typeGroup
+                    if oldTG and oldTG ~= newTG then
+                        local oldMembers = BuffMeCharDB.typeGroupMembers[oldTG]
+                        if oldMembers then
+                            for i, m in ipairs(oldMembers) do
+                                if m == normalAura then table.remove(oldMembers, i); break end
+                            end
+                        end
+                        BuffMeCharDB.auraToTypeGroup[normalAura] = newTG
+                        local newMembers = BuffMeCharDB.typeGroupMembers[newTG]
+                        if newMembers then
+                            local found = false
+                            for _, m in ipairs(newMembers) do
+                                if m == normalAura then found = true; break end
+                            end
+                            if not found then table.insert(newMembers, normalAura) end
+                        end
+                        BuffMe_Debug("Repair: moved \"" .. entry.auraName .. "\" from typeGroup \"" ..
+                            oldTG .. "\" to \"" .. newTG .. "\" (tooltip sig disagreed)")
+                    end
+                end
+            end
+        end
+
+        -- A candidate pair recommending a merge that's already true (or became true via the
+        -- repair above) is just noise — drop any pair whose two sides already share a typeGroup.
+        for i = #BuffMeCharDB.candidatePairs, 1, -1 do
+            local p   = BuffMeCharDB.candidatePairs[i]
+            local tgA = BuffMeCharDB.auraToTypeGroup[BuffMe_NormalizeName(p.nameA)]
+            local tgB = BuffMeCharDB.auraToTypeGroup[BuffMe_NormalizeName(p.nameB)]
+            if tgA and tgA == tgB then
+                table.remove(BuffMeCharDB.candidatePairs, i)
+            end
+        end
+
+        BuffMeCharDB.greaterKeywordRepairV1 = true
+    end
+
     BuffMe_LoadOfficialDB()
+end
+
+-- Returns the user-chosen display name for a typeGroup, or the raw key if unset.
+function BuffMe_GetGroupDisplayName(tg)
+    local custom = BuffMeDB and BuffMeDB.typeGroupDisplayNames and BuffMeDB.typeGroupDisplayNames[tg]
+    if custom and custom ~= "" then return custom end
+    return tg
 end
 
 -- Record which spell was last cast for a typeGroup on a named target.
@@ -678,6 +793,80 @@ function BuffMe_MergeTypeGroups(auraName1, auraName2)
     end
 end
 
+-- Order-independent lookup key for a pair of aura names.
+local function PairKey(nameA, nameB)
+    local nA, nB = BuffMe_NormalizeName(nameA), BuffMe_NormalizeName(nameB)
+    if nA > nB then nA, nB = nB, nA end
+    return nA .. "|" .. nB
+end
+
+-- Record (or bump the seen-count of) a passively-observed "these two displace each other"
+-- pair for later user review — see BuffMeCharDB.candidatePairs above. Not gated on Learn
+-- Mode: reviewing/accepting is itself the confirmation step, so recording the observation
+-- is safe even with Learn Mode off (nothing is auto-registered here).
+function BuffMe_RecordCandidatePair(nameA, nameB, unit)
+    if not BuffMeCharDB or nameA == nameB then return end
+    local key = PairKey(nameA, nameB)
+    if BuffMeCharDB.rejectedPairs[key] then return end
+    -- Already linked into the same typeGroup — nothing left to review.
+    local tgA = BuffMeCharDB.auraToTypeGroup[BuffMe_NormalizeName(nameA)]
+    local tgB = BuffMeCharDB.auraToTypeGroup[BuffMe_NormalizeName(nameB)]
+    if tgA and tgA == tgB then return end
+
+    for _, p in ipairs(BuffMeCharDB.candidatePairs) do
+        if p.key == key then
+            p.seenCount = (p.seenCount or 1) + 1
+            p.lastSeen  = date("%H:%M:%S")
+            return
+        end
+    end
+    table.insert(BuffMeCharDB.candidatePairs, {
+        key = key, nameA = nameA, nameB = nameB, unit = unit,
+        firstSeen = date("%H:%M:%S"), seenCount = 1,
+    })
+    BuffMe_Debug("Candidate pair recorded: \"" .. nameA .. "\" <-> \"" .. nameB .. "\" on " .. tostring(unit))
+end
+
+-- Accept a candidate pair: link both auras into the same typeGroup (creating one if neither
+-- side has one yet), then drop it from the review queue.
+function BuffMe_AcceptCandidatePair(key)
+    if not BuffMeCharDB then return end
+    for i, p in ipairs(BuffMeCharDB.candidatePairs) do
+        if p.key == key then
+            local nA, nB = BuffMe_NormalizeName(p.nameA), BuffMe_NormalizeName(p.nameB)
+            local tgA = BuffMeCharDB.auraToTypeGroup[nA]
+            local tgB = BuffMeCharDB.auraToTypeGroup[nB]
+            if tgA and tgB then
+                BuffMe_MergeTypeGroups(p.nameA, p.nameB)
+            elseif tgA then
+                BuffMe_RegisterAuraInTypeGroup(p.nameB, tgA)
+            elseif tgB then
+                BuffMe_RegisterAuraInTypeGroup(p.nameA, tgB)
+            else
+                local newTG = nA
+                BuffMeCharDB.typeGroupMembers[newTG] = BuffMeCharDB.typeGroupMembers[newTG] or {}
+                BuffMe_RegisterAuraInTypeGroup(p.nameA, newTG)
+                BuffMe_RegisterAuraInTypeGroup(p.nameB, newTG)
+            end
+            BuffMe_Debug("Candidate pair accepted: \"" .. p.nameA .. "\" + \"" .. p.nameB .. "\"")
+            table.remove(BuffMeCharDB.candidatePairs, i)
+            return
+        end
+    end
+end
+
+-- Reject a candidate pair: drop it and remember not to re-suggest it.
+function BuffMe_RejectCandidatePair(key)
+    if not BuffMeCharDB then return end
+    BuffMeCharDB.rejectedPairs[key] = true
+    for i, p in ipairs(BuffMeCharDB.candidatePairs) do
+        if p.key == key then
+            table.remove(BuffMeCharDB.candidatePairs, i)
+            return
+        end
+    end
+end
+
 -- Link two spell IDs into the same targetGroup (they are mutually exclusive on any single target)
 function BuffMe_LinkTargetGroup(spellId1, spellId2, groupName)
     groupName = groupName
@@ -828,6 +1017,33 @@ function BuffMe_RegisterAuraInTypeGroup(auraName, typeGroup)
     end
 end
 
+-- Returns every unit token BuffMe should watch: raid1..N when in a raid (WotLK has no
+-- party1-4 tokens once you're grouped as a raid), otherwise player + party1-4.
+function BuffMe_GetTrackedUnits()
+    local raidSize = GetNumRaidMembers and GetNumRaidMembers() or 0
+    if raidSize and raidSize > 0 then
+        local units = {}
+        for i = 1, raidSize do units[i] = "raid" .. i end
+        return units
+    end
+    local units = { "player" }
+    for i = 1, GetNumPartyMembers() do units[#units + 1] = "party" .. i end
+    return units
+end
+
+-- Substrings (checked against the lowercased tooltip sig) that flag a passively-observed,
+-- not-yet-known buff as worth a diagnostic callout — e.g. raid consumables/world buffs that
+-- don't overlap with anything the player casts, so they'd otherwise never surface. "reduc"
+-- (not "reduce"/"reduced") deliberately catches every inflection in one substring check.
+local CANDIDATE_KEYWORDS = { "increase", "restore", "reduc" }
+
+local function SigHasCandidateKeyword(sig)
+    for _, kw in ipairs(CANDIDATE_KEYWORDS) do
+        if sig:find(kw, 1, true) then return true end
+    end
+    return false
+end
+
 -- Effect-group discovery is split into a cheap enqueue phase (this function — just table
 -- lookups over UnitBuff, no tooltip reads) and a throttled batch-drain phase
 -- (BuffMe_ProcessScanQueue) that resolves the actual expensive step, one tooltip read per
@@ -836,15 +1052,17 @@ end
 -- them synchronously in one frame — a visible stutter.
 local scanQueue = {}
 local scanQueueSeen = {}  -- "unit\0normalName" -> true, de-dupes pending queue entries
+-- normalNames already tooltip-read and resolved (matched or dismissed) this session, so
+-- ProcessScanQueue never re-reads the same irrelevant buff's tooltip on every rescan.
+local scanResolved = {}
 
 -- Scan buff lists for auras not yet known to any effect group and queue them for batched
 -- tooltip resolution. Pass a specific unit token to scan just that unit, or nil to scan
--- all party members. Called passively on UNIT_AURA and PARTY_MEMBERS_CHANGED so we discover
--- weaker/equivalent external effects (e.g. another player's "Earthen Endurance" sharing
--- Grove Instinct's sig) without waiting for a cast error to reveal them.
+-- every tracked unit (raid-wide when in a raid, else party). Called passively on UNIT_AURA
+-- and roster-change events so we discover weaker/equivalent external effects (e.g. another
+-- player's "Earthen Endurance" sharing Grove Instinct's sig) without waiting for a cast
+-- error to reveal them.
 function BuffMe_ScanPartyForEffectGroups(specificUnit)
-    if not next(BuffMeCharDB.effectGroups) then return end
-
     -- Build reverse index of normalNames already in some effectGroup (built once per call)
     local knownInEG = {}
     for _, egEntry in pairs(BuffMeCharDB.effectGroups) do
@@ -853,9 +1071,7 @@ function BuffMe_ScanPartyForEffectGroups(specificUnit)
         end
     end
 
-    local units = specificUnit
-        and { specificUnit }
-        or { "player", "party1", "party2", "party3", "party4" }
+    local units = specificUnit and { specificUnit } or BuffMe_GetTrackedUnits()
 
     for _, unit in ipairs(units) do
         if UnitExists(unit) then
@@ -864,7 +1080,7 @@ function BuffMe_ScanPartyForEffectGroups(specificUnit)
                 local buffName = UnitBuff(unit, i)
                 if not buffName then break end
                 local normalName = BuffMe_NormalizeName(buffName)
-                if not knownInEG[normalName] then
+                if not knownInEG[normalName] and not scanResolved[normalName] then
                     local key = unit .. "\0" .. normalName
                     if not scanQueueSeen[key] then
                         scanQueueSeen[key] = true
@@ -916,7 +1132,14 @@ function BuffMe_ProcessScanQueue()
                             BuffMe_Debug("Effect group match (passive): \"" .. buffName ..
                                 "\" → typeGroup \"" .. egEntry.typeGroup .. "\" on " .. job.unit)
                             matched = true
+                        elseif SigHasCandidateKeyword(sig) then
+                            -- Doesn't match anything we already track, but its tooltip reads
+                            -- like a stat buff/debuff worth reviewing as a new spell group
+                            -- candidate (e.g. a raid consumable or another class's buff).
+                            BuffMe_Debug("Candidate spell group: \"" .. buffName .. "\" on " ..
+                                job.unit .. " — sig: " .. sig)
                         end
+                        scanResolved[job.normalName] = true
                     end
                     break
                 end

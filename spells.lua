@@ -290,8 +290,15 @@ end
 -- BuffMe_RegisterSpell, BuffMe_MergeTypeGroups, BuffMe_RegisterInEffectGroup). Never
 -- overwrites data the character has already learned/customized; official data only fills
 -- gaps, so a hand-tuned priority or an already-discovered relationship always wins.
+--
+-- BuffMe_OfficialDB is keyed by realm name (GetRealmName()): "Classic" and "Conquest of
+-- Azeroth" ruleset realms run non-overlapping spell sets, and Wildcard realms draw random
+-- per-character spellbooks that would corrupt a shared baseline entirely — so there is no
+-- realm-agnostic bucket, only per-realm ones populated by hand (see SpellDB.lua header).
+-- A realm with no baseline entry yet (including any Wildcard realm) simply merges nothing
+-- and falls back to pure Learn Mode discovery.
 function BuffMe_LoadOfficialDB()
-    local official = BuffMe_OfficialDB
+    local official = BuffMe_OfficialDB and BuffMe_OfficialDB[GetRealmName()]
     if not official then return end
 
     for spellId, off in pairs(official.spells or {}) do
@@ -372,6 +379,15 @@ function BuffMe_InitDB()
     end
     -- Alias: all code that reads/writes BuffMeCharDB now writes into BuffMeDB.chars[charName].
     BuffMeCharDB = BuffMeDB.chars[charName]
+    -- Realm + class, refreshed every login. Used to key the official baseline
+    -- (BuffMe_OfficialDB, see BuffMe_LoadOfficialDB) and, more importantly, to let the
+    -- promotion tooling (Tools/Export-BuffMeDB.ps1) identify and exclude Wildcard
+    -- characters (classToken "HERO") from SpellDB.lua — Wildcard spellbooks are drawn
+    -- per-character at random, so one hero's learned spellGroups are meaningless (and
+    -- actively misleading) for every other character on the account.
+    BuffMeCharDB.realm = GetRealmName()
+    local _, classToken = UnitClass("player")
+    BuffMeCharDB.classToken = classToken
     -- [spellId] = { spellId, name, auraName, priority }
     BuffMeCharDB.spells              = BuffMeCharDB.spells              or {}
     -- [normalizedAuraName] = typeGroup string

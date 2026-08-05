@@ -16,6 +16,15 @@ chunk()
 local db = BuffMeDB and BuffMeDB.chars and BuffMeDB.chars[charName]
 assert(db, "No BuffMeDB.chars[\"" .. charName .. "\"] found in " .. svPath)
 
+-- classToken/realm are written by BuffMe_InitDB (spells.lua) on every login. Flag Wildcard
+-- (classToken "HERO") characters loudly: their spellGroups are drawn per-character at random
+-- and must never be promoted into SpellDB.lua's shared per-realm baseline.
+if db.classToken == "HERO" then
+    io.stderr:write("WARNING: " .. charName .. " is a Wildcard (HERO) character on realm '"
+        .. tostring(db.realm) .. "' — do NOT promote spells/spellGroups from this export "
+        .. "into SpellDB.lua.\n")
+end
+
 -- Minimal JSON encoder: just enough for this data shape (nested tables, strings, numbers,
 -- booleans). Arrays are detected as tables with a contiguous 1..n integer key run;
 -- everything else is encoded as an object with sorted keys for stable diffs.

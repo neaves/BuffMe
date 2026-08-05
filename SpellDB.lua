@@ -1,10 +1,18 @@
 -- BuffMe Official Spell Database
 --
--- Baseline, class-agnostic data shipped with the addon and shared by every character on
--- every account. This is the "known good" dataset, verified through live testing, that
--- BuffMe_InitDB (spells.lua) merges into each character's learned DB (BuffMeCharDB) as
--- defaults every login. Official data never overwrites data a character has already
--- learned/customized — it only fills gaps.
+-- Baseline data shipped with the addon and shared by every character on the same realm.
+-- This is the "known good" dataset, verified through live testing, that BuffMe_LoadOfficialDB
+-- (spells.lua) merges into each character's learned DB (BuffMeCharDB) as defaults every
+-- login, keyed by that character's current realm (GetRealmName()). Official data never
+-- overwrites data a character has already learned/customized — it only fills gaps.
+--
+-- Keyed per realm, not shared globally: "Classic" and "Conquest of Azeroth" ruleset realms
+-- run non-overlapping spell sets, and Wildcard realms (characters are class "HERO", spells
+-- drawn at random per character) have no meaningful shared baseline at all — a Wildcard
+-- hero's learned spellGroups are never promoted here (see the promotion workflow note
+-- below and Tools/Export-BuffMeDB.ps1, which tags each export with classToken/realm so a
+-- HERO-class export is never mistaken for promotable data). A realm absent from this table
+-- just means every character on it relies on pure Learn Mode discovery.
 --
 -- "Learn Mode" (config: Learn new spells/relationships) is ON by default, since this file
 -- is still sparse. With Learn Mode off, BuffMe stops auto-registering NEW spells/typeGroups/
@@ -42,6 +50,7 @@
 -- exclusivity first.
 
 BuffMe_OfficialDB = {
+  ["Rexxar - Conquest of Azeroth"] = {
     -- Player-castable spells this character can learn to buff with.
     -- [spellId] = {
     --     name       = "Spell Name",       -- as cast (matches UNIT_SPELLCAST_SENT/SUCCEEDED)
@@ -327,15 +336,19 @@ BuffMe_OfficialDB = {
         -- healing received%); user-confirmed real exclusivity, and independently confirmed
         -- in one character's diagnosticLog via a CLEU-observed same-instant replacement
         -- ("Buff replacement (CLEU): Fetid Ward -> Bone Ward -- merging typeGroups").
+        -- Deliberately excludes plain single-attribute names ("stamina", "intellect",
+        -- "strength", "agility", "spirit") — these are generic aura names granted by
+        -- "Scroll of <Attribute> <Rank>" item procs, reused across many unrelated sources.
+        -- A same-instant CLEU misattribution (2026-08-04, this same character) once wrote
+        -- "stamina"/"intellect" here as if they shared the Ward's compound tooltip, which
+        -- permanently masked real Ward recommendations any time a stat scroll was active.
         boneward                  = "boneward",
         powerwuju                 = "boneward",
         shieldbeacon              = "boneward",
-        stamina                   = "boneward",
         woodsmansadaptation       = "boneward",
         callofthestorm            = "boneward",
         celestialmind             = "boneward",
         glacialward               = "boneward",
-        intellect                 = "boneward",
         nozdormuswisdom           = "boneward",
         sealofalysrazor           = "boneward",
         corpsewagon               = "boneward",
@@ -529,7 +542,6 @@ BuffMe_OfficialDB = {
                 boneward            = { name = "Bone Ward", value = 30 },
                 powerwuju           = { name = "Power Wuju", value = 55 },
                 shieldbeacon        = { name = "Shield Beacon", value = 370 },
-                stamina             = { name = "Stamina", value = 21 },
                 woodsmansadaptation = { name = "Woodsman's Adaptation", value = 30 },
             },
         },
@@ -539,7 +551,6 @@ BuffMe_OfficialDB = {
                 callofthestorm  = { name = "Call of the Storm", value = 0 },
                 celestialmind   = { name = "Celestial Mind", value = 25 },
                 glacialward     = { name = "Glacial Ward", value = 30 },
-                intellect       = { name = "Intellect", value = 3 },
                 nozdormuswisdom = { name = "Nozdormu's Wisdom", value = 0 },
                 sealofalysrazor = { name = "Seal of Alysrazor", value = 15 },
             },
@@ -614,4 +625,5 @@ BuffMe_OfficialDB = {
             },
         },
     },
+  },
 }

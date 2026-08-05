@@ -40,6 +40,8 @@ Account-wide:
   typeGroupDisplayNames [tg]    → user-chosen display name (Spell Groups panel rename; overlay only)
 
 Per character (BuffMeDB.chars[charName], aliased to BuffMeCharDB):
+  realm                        → GetRealmName(), refreshed every login
+  classToken                   → UnitClass("player") english token; "HERO" on Wildcard realms
   spells               [key]   → { spellId, name, auraName, priority, groupCast?, selfOnly?,
                                     partyOnly?, ineligible?, tooltipSig, tooltipValue }
   nameToKey            [name]  → key  (reverse index for O(1) "already known" checks)
@@ -99,6 +101,20 @@ Per character (BuffMeDB.chars[charName], aliased to BuffMeCharDB):
   per-target "last cast" preference**, not just over the plain priority fallback — otherwise a
   recorded preference for the single-target version can pin the optimizer to it indefinitely even
   after the group-cast version becomes known.
+
+## Wildcard / multi-realm isolation (2026-08-05)
+
+`BuffMe_OfficialDB` (`SpellDB.lua`) is keyed by realm name (`GetRealmName()`), not shared
+globally — Classic and Conquest of Azeroth ruleset realms run non-overlapping spell sets,
+and Wildcard realms (characters are class `HERO`, spells drawn randomly per character) have
+no meaningful shared baseline at all. `BuffMe_LoadOfficialDB` merges only
+`BuffMe_OfficialDB[GetRealmName()]`; a realm with no entry (any Wildcard realm today) just
+falls back to pure Learn Mode discovery for that character. `BuffMeCharDB.realm`/
+`classToken` are written every login so the promotion tooling can see them —
+`Tools/ExportSavedVariables.lua` prints a loud warning when exporting a `HERO`-class
+character. **Rule: never promote spells/spellGroups/effectGroups from a HERO-class export
+into `SpellDB.lua`.** Existing baseline data (Primalist/Necromancer/etc.) all came from
+"Rexxar - Conquest of Azeroth" and now lives under that key.
 
 ## Open items
 

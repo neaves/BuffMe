@@ -318,6 +318,10 @@ InterfaceOptions_AddCategory(panel)
 -- ── Shared scroll-row pool helper ─────────────────────────────────────────────
 -- Creates Frame-based rows on demand and reuses them across refreshes.
 -- Each row is a fixed-height frame parented to `content` with a text label.
+-- Rows carry optional f.tooltipTitle (string) / f.tooltipLines (array of strings), read by
+-- the shared OnEnter below. Callers must set both on every refresh (or clear them to nil)
+-- since pooled rows are reused by index across refreshes and can switch between a header
+-- role (no tooltip) and a member role (tooltip) from one refresh to the next.
 local function MakeRowPool(content, rowHeight)
     local pool = {}
     return function(i)
@@ -328,6 +332,17 @@ local function MakeRowPool(content, rowHeight)
             f.text:SetPoint("LEFT", 2, 0)
             f.text:SetPoint("RIGHT", 0, 0)
             f.text:SetJustifyH("LEFT")
+            f:EnableMouse(true)
+            f:SetScript("OnEnter", function(self)
+                if not self.tooltipTitle then return end
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText(self.tooltipTitle, 1, 0.82, 0)
+                for _, line in ipairs(self.tooltipLines or {}) do
+                    GameTooltip:AddLine(line, 1, 1, 1, true)
+                end
+                GameTooltip:Show()
+            end)
+            f:SetScript("OnLeave", function() GameTooltip:Hide() end)
             pool[i] = f
         end
         return pool[i]
@@ -373,14 +388,20 @@ local function MakeGroupHeaderRowPool(content, rowHeight)
             local f = CreateFrame("Frame", nil, content)
             f:SetHeight(rowHeight)
 
-            local edit = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
+            -- InputBoxTemplate's border textures are named $parentLeft/$parentMiddle/
+            -- $parentRight in the template XML; an unnamed (nil) EditBox can't resolve
+            -- that $parent substitution to a stable per-instance texture, so pooled rows
+            -- end up fighting over the same texture objects (one row's Middle texture
+            -- renders on top of another's text; others lose theirs and show only the
+            -- fixed-width Left/Right endcaps). Give each pooled row a unique name.
+            local edit = CreateFrame("EditBox", "BuffMeGroupsEditBox" .. i, f, "InputBoxTemplate")
             edit:SetSize(250, 16)
             edit:SetPoint("LEFT", 4, 0)
             edit:SetAutoFocus(false)
             edit:SetMaxLetters(40)
             f.edit = edit
 
-            local okBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+            local okBtn = CreateFrame("Button", "BuffMeGroupsOkBtn" .. i, f, "UIPanelButtonTemplate")
             okBtn:SetSize(36, 18)
             okBtn:SetText("OK")
             okBtn:SetPoint("LEFT", edit, "RIGHT", 6, 0)
@@ -508,6 +529,16 @@ local function RefreshGroupsPanel()
                 row.text:SetTextColor(0.45, 0.45, 0.45)
             else
                 row.text:SetTextColor(0.9, 0.9, 0.9)
+            end
+            row.tooltipTitle = displayName
+            if sp.tooltipText then
+                local lines = {}
+                for line in (sp.tooltipText .. "\n"):gmatch("(.-)\n") do
+                    if line ~= "" then table.insert(lines, line) end
+                end
+                row.tooltipLines = lines
+            else
+                row.tooltipLines = { "No tooltip captured yet — recast this spell so BuffMe can read its effect." }
             end
             y = y + 14
         end
@@ -974,6 +1005,8 @@ local function RefreshEffectGroupsPanel()
         row:Show()
         row.text:SetText(label)
         row.text:SetTextColor(1, 0.82, 0)
+        row.tooltipTitle = nil
+        row.tooltipLines = nil
         y = y + 17
 
         -- Sort members alphabetically (value used for ordering intent but not displayed)
@@ -997,6 +1030,13 @@ local function RefreshEffectGroupsPanel()
                 row.text:SetTextColor(0.9, 0.9, 0.9)
             else
                 row.text:SetTextColor(0.6, 0.8, 1)  -- light blue for external sources
+            end
+            row.tooltipTitle = m.name
+            if isCastable then
+                row.tooltipLines = { "Source: You" }
+            else
+                local sourceClass = BuffMeCharDB.auraSourceClass and BuffMeCharDB.auraSourceClass[m.normalName]
+                row.tooltipLines = { "Source: " .. (sourceClass or "Unknown (not yet observed)") }
             end
             y = y + 14
         end

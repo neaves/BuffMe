@@ -186,17 +186,22 @@ end
 -- Called from the CLEU SPELL_AURA_APPLIED and UNIT_AURA fallback handlers immediately
 -- after a buff from the player is confirmed as landed on a unit.
 function BuffMe_CaptureAuraTooltip(unit, entry)
-    if entry.tooltipSig then return end  -- already captured
+    -- Guard on tooltipText, not tooltipSig: baseline-seeded spells (SpellDB.lua) already
+    -- have tooltipSig pre-filled by BuffMe_LoadOfficialDB, so guarding on tooltipSig would
+    -- mean tooltipText (added for the Spell Groups tooltip display) never gets captured
+    -- for them even after a recast.
+    if entry.tooltipText then return end  -- already captured
     if not UnitExists(unit) then return end
     local i = 1
     while true do
         local buffName = UnitBuff(unit, i)
         if not buffName then break end
         if buffName == entry.auraName then
-            local sig, value = BuffMe_GetUnitBuffInfo(unit, i)
+            local sig, value, rawText = BuffMe_GetUnitBuffInfo(unit, i)
             if sig and sig ~= "" then
                 entry.tooltipSig   = sig
                 entry.tooltipValue = value
+                entry.tooltipText  = rawText
                 local normalAura = BuffMe_NormalizeName(entry.auraName)
                 local tg = BuffMeCharDB.auraToTypeGroup[normalAura]
                 if tg then
@@ -211,14 +216,15 @@ function BuffMe_CaptureAuraTooltip(unit, entry)
     end
 end
 
--- Return the tooltip signature and primary numeric value for a unit buff at index i.
--- Public so the optimizer can call it when scanning unknown buffs against effect groups.
+-- Return the tooltip signature, primary numeric value, and raw (un-normalized) text for a
+-- unit buff at index i. Public so the optimizer can call it when scanning unknown buffs
+-- against effect groups; the third return (rawText) is for UI display only.
 function BuffMe_GetUnitBuffInfo(targetUnit, index)
     local tt = GetScanTT()
     tt:ClearLines()
     tt:SetUnitBuff(targetUnit, index)
     local lines = ReadScanTTLines(tt)
-    return LinesToSig(lines), LinesToValue(lines)
+    return LinesToSig(lines), LinesToValue(lines), table.concat(lines, "\n")
 end
 
 -- Filler/connector words that appear across unrelated spell names and must never
@@ -416,6 +422,10 @@ function BuffMe_InitDB()
     -- Keyed by normalized tooltip signature (digits→#); used by the optimizer to match
     -- unknown buffs on targets to our known effect groups by comparing tooltip text.
     BuffMeCharDB.effectGroups     = BuffMeCharDB.effectGroups     or {}
+    -- [normalizedAuraName] = localized class name; learned via CLEU when someone other
+    -- than the player applies/refreshes a buff. Drives the Effect Groups "Source: <Class>"
+    -- tooltip. See BuffMe_LearnAuraSource.
+    BuffMeCharDB.auraSourceClass = BuffMeCharDB.auraSourceClass or {}
     -- [typeGroup] = true; learned when a spell's aura is observed moving from one
     -- destGUID to a different destGUID on the same cast (server allows only one live
     -- instance anywhere, e.g. "Bless"). The optimizer treats these typeGroups as
@@ -1018,6 +1028,24 @@ function BuffMe_RegisterInEffectGroup(sig, typeGroup, normalName, displayName, v
         BuffMeCharDB.effectGroups[sig] = group
     end
     group.members[normalName] = { name = displayName, value = value or 0 }
+end
+
+-- Learn which class grants a given aura, keyed by the aura's own normalized name (separate
+-- from effectGroups so it survives BuffMe_RegisterInEffectGroup's full-table member
+-- overwrite above). Called from BuffMe.lua's CLEU handler when a buff is applied/refreshed
+-- by someone other than the player, for the "Source: <Class>" Effect Groups tooltip.
+-- Fill-gap only (never overwrites), same convention as the rest of this file; class-only,
+-- no spec — GetSpecializationInfo is player-only and confirmed broken for HERO characters.
+function BuffMe_LearnAuraSource(spellName, sourceUnit)
+    if not spellName or not sourceUnit then return end
+    if not BuffMe_LearnModeEnabled() then return end
+    local normalName = BuffMe_NormalizeName(spellName)
+    BuffMeCharDB.auraSourceClass = BuffMeCharDB.auraSourceClass or {}
+    if BuffMeCharDB.auraSourceClass[normalName] then return end
+    local localizedClass = UnitClass(sourceUnit)
+    if localizedClass then
+        BuffMeCharDB.auraSourceClass[normalName] = localizedClass
+    end
 end
 
 function BuffMe_RegisterAuraInTypeGroup(auraName, typeGroup)

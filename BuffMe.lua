@@ -872,6 +872,16 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 if GUIDToUnit(destGUID) then
                     BuffMe_ForceRefresh()
                 end
+            elseif spellName and sourceGUID then
+                -- Not our cast: learn who grants this buff (class only) for the Effect
+                -- Groups "Source: <Class>" tooltip. Handled on REFRESH too, not just
+                -- APPLIED — a buff already active before we joined the group/logged in
+                -- would otherwise never fire APPLIED for us to observe (see
+                -- feedback-refresh-bypasses-learning).
+                local sourceUnit = GUIDToUnit(sourceGUID)
+                if sourceUnit then
+                    BuffMe_LearnAuraSource(spellName, sourceUnit)
+                end
             end
 
         elseif eventType == "SPELL_AURA_APPLIED" and auraType == "BUFF" then
@@ -1025,9 +1035,19 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         end  -- isFriendlyDest
                     end
                 end
-            elseif destGUID == playerGUID then
-                BuffMe_Debug("Untracked aura on player: \"" .. (spellName or "?") ..
-                    "\" (ID " .. (spellId or "?") .. ") from " .. (sourceName or sourceGUID or "?"))
+            else
+                if destGUID == playerGUID then
+                    BuffMe_Debug("Untracked aura on player: \"" .. (spellName or "?") ..
+                        "\" (ID " .. (spellId or "?") .. ") from " .. (sourceName or sourceGUID or "?"))
+                end
+                -- Not our cast (regardless of who it landed on): learn who grants this
+                -- buff (class only) for the Effect Groups "Source: <Class>" tooltip.
+                if spellName and sourceGUID then
+                    local sourceUnit = GUIDToUnit(sourceGUID)
+                    if sourceUnit then
+                        BuffMe_LearnAuraSource(spellName, sourceUnit)
+                    end
+                end
             end
         elseif eventType == "SPELL_AURA_REMOVED" and auraType == "BUFF" then
             if sourceGUID == playerGUID then

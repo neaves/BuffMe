@@ -43,12 +43,14 @@ Per character (BuffMeDB.chars[charName], aliased to BuffMeCharDB):
   realm                        → GetRealmName(), refreshed every login
   classToken                   → UnitClass("player") english token; "HERO" on Wildcard realms
   spells               [key]   → { spellId, name, auraName, priority, groupCast?, selfOnly?,
-                                    partyOnly?, ineligible?, tooltipSig, tooltipValue }
+                                    partyOnly?, ineligible?, tooltipSig, tooltipValue, tooltipText }
   nameToKey            [name]  → key  (reverse index for O(1) "already known" checks)
   auraToTypeGroup      [norm]  → typeGroup string
   typeGroupMembers     [tg]    → { norm, ... }
   globalTypeGroups     [tg]    → true  (server allows only one live instance anywhere, e.g. "Bless")
   effectGroups         [sig]   → { typeGroup, members = { [norm] = { name, value } } }
+  auraSourceClass      [norm]  → localized class name; learned via CLEU from non-player casters,
+                                  drives the Effect Groups "Source: <Class>" tooltip
   auraDisplayNames     [norm]  → original display name
   spellToTargetGroup / targetGroupMembers, spellToPlayerGroup / playerGroupMembers — as typeGroup
   lastCastForGroup     [tg][targetName] → spellKey  (per-target cast preference)
